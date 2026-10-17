@@ -55,3 +55,6 @@ local.properties
 # workspace scratch (local only)
 .tmp/
 *.apk
+
+# NDK build cache (not cmake dir "cxx")
+.cxx/
