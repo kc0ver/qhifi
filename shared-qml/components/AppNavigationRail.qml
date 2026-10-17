@@ -57,7 +57,7 @@ Item {
             anchors.left: railLogo.right
             anchors.leftMargin: 12
             anchors.verticalCenter: railLogo.verticalCenter
-            text: "QPlayer"
+            text: "QHIFI"
             opacity: (rail.pageManager.expanded && (!hostWindow.available)) ? 1 : 0
             visible: opacity > 0.01
             Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }

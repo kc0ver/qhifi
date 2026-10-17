@@ -2,20 +2,31 @@ package dev.t1m3.qplayer.android.playback;
 
 import android.content.Context;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 
 import dev.t1m3.qplayer.audio.AudioBackend;
+import dev.t1m3.qplayer.audio.AudioOutputDevice;
+import dev.t1m3.qplayer.audio.AudioOutputStatus;
+import dev.t1m3.qplayer.audio.HifiCapabilities;
+import dev.t1m3.qplayer.audio.HifiOutputControl;
+import dev.t1m3.qplayer.audio.HifiOutputMode;
+import dev.t1m3.qplayer.i18n.I18n;
 import dev.t1m3.qplayer.util.Logger;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -26,8 +37,15 @@ import java.util.Map;
  *
  * <p>Prepared asynchronously: {@link #play} kicks off {@code prepareAsync} and
  * starts on the prepared callback, honoring the requested start offset.
+ *
+ * <p>It also answers the read-only half of {@link HifiOutputControl}: which
+ * output routes exist, what the framework is doing with the current source, and
+ * whether a bit-perfect stream is even possible on this device. Playback itself
+ * still goes through MediaPlayer either way — the direct-output backend that
+ * would act on the four setters is a separate, later piece of work, so here they
+ * only record what the user asked for.
  */
-public final class AndroidAudioBackend implements AudioBackend {
+public final class AndroidAudioBackend implements AudioBackend, HifiOutputControl {
 
     private MediaPlayer player;
     private String source;
@@ -55,6 +73,14 @@ public final class AndroidAudioBackend implements AudioBackend {
     private WifiManager.WifiLock wifiLock;
     private final Handler stallHandler = new Handler(Looper.getMainLooper());
     private final Runnable stallCheck = this::checkStall;
+
+    // --- HiFi output control ----------------------------------------------
+    /** Guarded by {@link #probeLock}: format of {@link #probedSource}. */
+    private final Object probeLock = new Object();
+    private String probedSource;
+    private String probedEncoding = "";
+    private int probedSampleRate;
+    private int probedBitDepth;
 
     public AndroidAudioBackend(Context ctx) {
         appContext = ctx.getApplicationContext();
@@ -301,6 +327,140 @@ public final class AndroidAudioBackend implements AudioBackend {
         releaseWifiLock();
         releasePlayer();
         abandonFocus();
+    }
+
+    // --- HifiOutputControl -------------------------------------------------
+
+    @Override
+    public List<AudioOutputDevice> outputDevices() {
+        List<AudioOutputDevice> out = new ArrayList<>();
+        // Automatic is always first and always available, even with no USB DAC
+        // attached — it is what the picker falls back to.
+        AudioDeviceInfo active = AndroidHifiProbe.activeOutput(audioManager);
+        String activeId = active != null ? String.valueOf(active.getId()) : "";
+        out.add(new AudioOutputDevice("", I18n.tr("settings.hifiOutputDevice.auto"),
+                AndroidHifiProbe.routeTypeOf(active),
+                AndroidHifiProbe.bitPerfectCapable(active)));
+        for (AudioDeviceInfo device : AndroidHifiProbe.outputs(audioManager)) {
+            String routeType = AndroidHifiProbe.routeTypeOf(device);
+            if (routeType == null) continue;   // remote submix, HDMI, no output route at all
+            String id = String.valueOf(device.getId());
+            if (id.equals(activeId)) continue; // already offered as the automatic entry
+            out.add(new AudioOutputDevice(id, AndroidHifiProbe.productName(device), routeType,
+                    AndroidHifiProbe.bitPerfectCapable(device)));
+        }
+        return out;
+    }
+
+    @Override
+    public AudioOutputStatus outputStatus() {
+        AudioDeviceInfo active = AndroidHifiProbe.activeOutput(audioManager);
+        probeSourceFormat(currentSource());
+        String sourceEncoding;
+        int sourceRate;
+        int sourceDepth;
+        synchronized (probeLock) {
+            sourceEncoding = probedEncoding;
+            sourceRate = probedSampleRate;
+            sourceDepth = probedBitDepth;
+        }
+        int outputRate = AndroidHifiProbe.mixRate(audioManager);
+        int outputDepth = AndroidHifiProbe.MIXER_BIT_DEPTH;
+        // The USB exclusive driver is what can be bit-perfect; MediaPlayer → AudioFlinger
+        // never is, but its availability still tells the chain card what this device
+        // could do with the switch on.
+        boolean bitPerfectSupported = !AndroidHifiProbe.usbOutputs(audioManager).isEmpty();
+        // MediaPlayer → AudioFlinger always re-encodes to the framework's PCM
+        // format, so the source counts as resampled whenever it had to be
+        // converted in rate or in depth.
+        boolean resampled = (sourceRate > 0 && sourceRate != outputRate)
+                || sourceDepth > outputDepth;
+        return new AudioOutputStatus(
+                active != null ? String.valueOf(active.getId()) : "",
+                active != null ? AndroidHifiProbe.productName(active)
+                        : I18n.tr("settings.hifiOutputDevice.auto"),
+                AndroidHifiProbe.routeTypeOf(active),
+                sourceEncoding, sourceRate, sourceDepth,
+                "PCM", outputRate, outputDepth,
+                resampled, bitPerfectSupported, false,
+                bitPerfectSupported ? "" : I18n.tr("settings.hifiChain.reason.usbRequired"),
+                HifiOutputMode.SYSTEM, HifiOutputMode.SYSTEM,
+                AudioOutputStatus.EXCLUSIVE_NONE, "", "software");
+    }
+
+    @Override
+    public HifiCapabilities capabilities() {
+        return AndroidHifiProbe.capabilities(appContext, audioManager);
+    }
+
+    // The setters below are inert on purpose: this backend keeps playing through
+    // MediaPlayer, so acting on them is the direct-output backend's job. Recording
+    // them here would be state nothing reads yet.
+
+    @Override
+    public void setHifiEnabled(boolean on) {
+    }
+
+    @Override
+    public void setFollowSampleRate(boolean on) {
+    }
+
+    @Override
+    public void selectOutputDevice(String deviceId) {
+    }
+
+    /** Snapshot of the source currently loaded, for the format probe. */
+    private synchronized String currentSource() {
+        return source;
+    }
+
+    /**
+     * Read the current source's own format, cached per source. Only local files
+     * and {@code content://} uris are read: probing an {@code http(s)} stream
+     * would mean a second network connection for what is only a readout, and the
+     * source format of a stream we did not open is genuinely unknown.
+     */
+    private void probeSourceFormat(String src) {
+        synchronized (probeLock) {
+            if (src == null || src.isEmpty()) {
+                probedSource = null;
+                probedEncoding = "";
+                probedSampleRate = 0;
+                probedBitDepth = 0;
+                return;
+            }
+            if (src.equals(probedSource)) return;
+            probedSource = src;
+            probedEncoding = "";
+            probedSampleRate = 0;
+            probedBitDepth = 0;
+            if (src.startsWith("http://") || src.startsWith("https://")) return;
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            try {
+                if (src.startsWith("content://")) {
+                    retriever.setDataSource(appContext, Uri.parse(src));
+                } else {
+                    retriever.setDataSource(src);
+                }
+                probedEncoding = AndroidHifiProbe.encodingLabel(
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE));
+                // Rate and depth arrived with Android 12; older platforms can
+                // only be told the codec, which is what an empty pair means.
+                if (Build.VERSION.SDK_INT >= 31) {
+                    probedSampleRate = AndroidHifiProbe.intMetadata(retriever,
+                            MediaMetadataRetriever.METADATA_KEY_SAMPLERATE);
+                    probedBitDepth = AndroidHifiProbe.intMetadata(retriever,
+                            MediaMetadataRetriever.METADATA_KEY_BITS_PER_SAMPLE);
+                }
+            } catch (Throwable e) {
+                Logger.warn("hifi source probe failed: {}", e.toString());
+            } finally {
+                try {
+                    retriever.release();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     // --- Audio focus ------------------------------------------------------

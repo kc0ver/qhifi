@@ -42,11 +42,15 @@ public final class SettingsCatalog {
     public static final String DESKTOP_LYRIC = "desktopLyric";
     public static final String LOCAL = "local";
     public static final String PLUGINS = "plugins";
+    /** Direct (bit-perfect) output routing. Every row in it is Android-only, so
+     *  the tab is dropped on desktop the same way {@link #DESKTOP_LYRIC} is on
+     *  Android — see {@link SettingsCore#categories()}. */
+    public static final String HIFI = "hifi";
     public static final String ABOUT = "about";
 
     public static final List<String> CATEGORIES = Collections.unmodifiableList(
             Arrays.asList(APPEARANCE, PAGES, PLAYBACK, LYRIC, OVERLAY_LYRIC, DESKTOP_LYRIC,
-                    LOCAL, PLUGINS, ABOUT));
+                    LOCAL, PLUGINS, HIFI, ABOUT));
 
     /** Fluid-background mode, 0 dynamic / 1 static. Stored under a new key
      *  because the same setting used to be a boolean ("lyricBgStatic") and a
@@ -144,6 +148,23 @@ public final class SettingsCatalog {
     public static final String LIBRARY_CARD_SIZE_KEY = "libraryCardSize";
     /** Grid of cover cards (false, default) vs. a compact row list. */
     public static final String LIBRARY_LIST_VIEW_KEY = "libraryListView";
+
+    /** Master switch for the direct output path: on means the app's own userspace
+     *  USB exclusive driver takes over, off leaves the system's own playback route
+     *  untouched — see {@link #HIFI}. */
+    public static final String HIFI_ENABLED_KEY = "hifiEnabled";
+    /** Output at the source's own sample rate instead of the framework's. */
+    public static final String HIFI_FOLLOW_RATE_KEY = "hifiFollowSampleRate";
+    /** Which end the volume slider drives on the exclusive stream: 0 = hardware
+     *  (the DAC's own control, software locked at 100%), 1 = software (the DAC
+     *  held at max, digital attenuation). */
+    public static final String HIFI_VOLUME_MODE_KEY = "hifiVolumeMode";
+    public static final int VOLUME_MODE_HARDWARE = 0;
+    public static final int VOLUME_MODE_SOFTWARE = 1;
+    /** Device id chosen from the picker dialog, "" = automatic. Stored without a
+     *  row of its own: the list is dynamic, so the row is an action that opens
+     *  the host's picker instead of a dropdown over static options. */
+    public static final String HIFI_DEVICE_KEY = "hifiOutputDevice";
 
     private SettingsCatalog() {}
 
@@ -534,6 +555,45 @@ public final class SettingsCatalog {
                 .group("folders")
                 .build());
 
+        // ---- HiFi 直通输出 (Android only) ------------------------------------
+        // Every row is Android-only, so the whole tab disappears on desktop
+        // (categories() drops a category with no visible rows). The chain card
+        // that explains what the output is actually doing lives on the settings
+        // page itself, not here: it is a readout, not a setting.
+        out.add(SettingSpec.toggle(HIFI_ENABLED_KEY, HIFI, "settings.hifiEnabled.title", false)
+                .desc("settings.hifiEnabled.desc")
+                .onlyOn(ANDROID)
+                .group("hifiOutput")
+                .build());
+        out.add(SettingSpec.toggle(HIFI_FOLLOW_RATE_KEY, HIFI, "settings.hifiFollowSampleRate.title", true)
+                .desc("settings.hifiFollowSampleRate.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiOutput")
+                .build());
+        out.add(SettingSpec.radio(HIFI_VOLUME_MODE_KEY, HIFI, "settings.hifiVolumeMode.title",
+                        VOLUME_MODE_HARDWARE,
+                        "settings.hifiVolumeMode.hardware", "settings.hifiVolumeMode.software")
+                .desc("settings.hifiVolumeMode.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiOutput")
+                .build());
+        // The device list is whatever the host can enumerate right now, and
+        // SettingSpec.options is static, so this cannot be a dropdown: the row
+        // opens the host's picker (same dialog pattern as the plugin/font rows)
+        // and shows the chosen device through the live-text provider.
+        out.add(SettingSpec.action("pickHifiDevice", HIFI, "settings.hifiOutputDevice.title", "")
+                .provider("hifiDeviceName").inlineProvider()
+                .desc("settings.hifiOutputDevice.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiDevice")
+                .build());
+        out.add(SettingSpec.hidden(HIFI_DEVICE_KEY, SettingSpec.TEXT, "")
+                .onlyOn(ANDROID)
+                .build());
+
         // ---- 关于 -----------------------------------------------------------
         // GitHub mirror used to sit under 播放 even though it only accelerates
         // app/plugin downloads — next to 检查更新 is where people look for it.
@@ -542,7 +602,7 @@ public final class SettingsCatalog {
                 .desc("settings.mirror.desc")
                 .group("network")
                 .build());
-        out.add(SettingSpec.action("openRepo", ABOUT, "QPlayer", "")
+        out.add(SettingSpec.action("openRepo", ABOUT, "QHIFI", "")
                 .provider("version").inlineProvider()
                 // Hard-coded breaks: qml4j's auto-wrap mis-measures this width.
                 .desc("settings.about.desc")

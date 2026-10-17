@@ -5,13 +5,15 @@ import dev.t1m3.qplayer.android.graphics.AndroidColorExtractor;
 import dev.t1m3.qplayer.i18n.I18n;
 import dev.t1m3.qplayer.android.library.AndroidLibraryScanner;
 import dev.t1m3.qplayer.android.library.AndroidMetadataReader;
-import dev.t1m3.qplayer.android.playback.AndroidAudioBackend;
+import dev.t1m3.qplayer.android.playback.AndroidUsbAudio;
+import dev.t1m3.qplayer.android.playback.HifiAudioDispatcher;
 import dev.t1m3.qplayer.android.playback.OverlayLyricWindow;
 import dev.t1m3.qplayer.android.playback.PlaybackService;
 import dev.t1m3.qplayer.android.settings.PrefsSettingsStore;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -20,14 +22,15 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.hardware.usb.UsbDevice;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.KeyEvent;
 
 import io.github.timer_err.qml4j.android.DexClassLoaderBackend;
 import io.github.timer_err.qml4j.android.QmlGLSurfaceView;
 import io.github.timer_err.qml4j.engine.QmlEngine;
 
-import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.audio.MetadataReader;
 import dev.t1m3.qplayer.bridge.PlayerController;
 import dev.t1m3.qplayer.model.Track;
@@ -101,6 +104,11 @@ public final class QPlayerActivity extends Activity {
     /** Singleton controller — survives Activity recreations (PiP, config changes)
      *  so playback state and the foreground service stay connected across them. */
     private static volatile PlayerController sharedController;
+    /** The backend that controller was built with. Kept beside it so a recreated
+     *  Activity can still ask the dispatcher whether it owns the output volume:
+     *  the controller's properties exist for the QML bindings, and are not a live
+     *  view of what the backend is doing. */
+    private static volatile HifiAudioDispatcher sharedBackend;
     private static boolean lyricFontsInitialized;
 
     static PlayerController sharedController() { return sharedController; }
@@ -141,7 +149,6 @@ public final class QPlayerActivity extends Activity {
         deleteRecursive(dev.t1m3.qplayer.store.AppDirs.cacheDir()
                 .resolve("plugin-imports").toFile());
 
-        AudioBackend backend = new AndroidAudioBackend(this);
         reader = new AndroidMetadataReader(this);
 
         // Before the controller: it starts the enabled plugins while it is being
@@ -158,8 +165,19 @@ public final class QPlayerActivity extends Activity {
         // to the old one, causing UI/notification desync.
         controller = sharedController;
         if (controller == null) {
+            // One long-lived backend for the whole process: the dispatcher keeps the
+            // MediaPlayer path as the system mode and builds the direct backends
+            // behind it, so the controller and the playback service never see the
+            // switch. Built only when the controller really is fresh — a reused
+            // controller keeps the backend it was built with, where a second
+            // dispatcher would register another device callback and sit there.
+            HifiAudioDispatcher backend = new HifiAudioDispatcher(this);
             controller = new PlayerController(backend, reader);
+            // A USB DAC appearing or disappearing re-probes the chain and updates
+            // the settings page without the user touching anything.
+            backend.setDeviceChangeListener(controller::refreshHifiStatus);
             sharedController = controller;
+            sharedBackend = backend;
         }
         // A reused controller still carries the one-shot event counters the
         // previous Activity's scene already consumed. The scene built below
@@ -235,6 +253,28 @@ public final class QPlayerActivity extends Activity {
         };
         controller.lyricsOpen.addListener(lyricsOpenListener);
 
+        // Enabling the exclusive USB driver asks the user, once per install, to
+        // exempt the app from battery optimization: OEM doze freezes background
+        // processes aggressively, and a frozen process cannot feed a USB stream
+        // it claimed from usbfs. The prompt only fires when the switch goes on.
+        controller.hifiEnabled.addListener(on -> {
+            if (!Boolean.TRUE.equals(on)) return;
+            runOnUiThread(() -> {
+                try {
+                    android.os.PowerManager pm =
+                            (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+                    if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                        startActivity(new android.content.Intent(
+                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                android.net.Uri.parse("package:" + getPackageName())));
+                    }
+                } catch (Throwable ignored) {
+                    // Some OEM builds strip the activity; background playback then
+                    // relies on the foreground service alone.
+                }
+            });
+        });
+
         // Settings: the catalog, the value plumbing and every side effect live in
         // player-core (shared with the desktop host). This host contributes the
         // SharedPreferences store, the platform id, and the actions/live text its
@@ -249,9 +289,13 @@ public final class QPlayerActivity extends Activity {
         settings.registerAction("clearCache", controller::clearDiskCache);
         settings.registerAction("checkUpdate", controller::checkForUpdateManual);
         settings.registerAction("openRepo",
-                () -> controller.openExternalUrl("https://github.com/TIMER-err/qplayer"));
+                () -> controller.openExternalUrl("https://github.com/kc0ver/qhifi"));
         settings.registerInfo("version", () -> "v" + controller.appVersion.peek());
         settings.registerInfo("cacheUsage", () -> controller.cacheSizeMB.peek() + " MB");
+        // HiFi tab: the current route's name (from the backend, so it follows a
+        // USB DAC being plugged in) and the picker the device row opens.
+        settings.registerInfo("hifiDeviceName", () -> controller.hifiDeviceName.peek());
+        settings.registerAction("pickHifiDevice", () -> runOnUiThread(this::showHifiDevicePicker));
         settings.load(new PrefsSettingsStore(this), SettingsCatalog.ANDROID);
         OverlayLyricWindow.bindSettings(settings);
         settings.onChange(SettingsCatalog.OVERLAY_LYRIC_KEY, value -> runOnUiThread(() -> {
@@ -404,6 +448,12 @@ public final class QPlayerActivity extends Activity {
                 if ("swipe".equalsIgnoreCase(cmd) || "fling".equalsIgnoreCase(cmd)) {
                     final String dir = arg;
                     runOnUiThread(() -> debugSwipe(dir));
+                    return;
+                }
+                if ("volprobe".equalsIgnoreCase(cmd)) {
+                    // Blocking USB control transfers; never on the main thread.
+                    new Thread(HifiAudioDispatcher::runVolumeProbe,
+                            "qplayer-volprobe").start();
                     return;
                 }
                 controller.debugCommand(cmd, arg);
@@ -711,6 +761,44 @@ public final class QPlayerActivity extends Activity {
         } catch (Throwable e) {
             dev.t1m3.qplayer.util.Logger.error("no gallery app to pick a cover: {}", e.toString());
         }
+    }
+
+    /** The HiFi tab's "输出设备" row: a native chooser over the USB DACs the
+     *  device reports right now. The list is dynamic (a DAC appears and
+     *  disappears with the plug), so it is re-enumerated on every open and the
+     *  dialog carries its own 刷新 action — no need to leave the settings page.
+     *  Entries are named from the USB descriptor, so a real product name shows
+     *  instead of a generic label. */
+    private void showHifiDevicePicker() {
+        final List<UsbDevice> devices = AndroidUsbAudio.listAudioDevices(this);
+        String current = settings.str(SettingsCatalog.HIFI_DEVICE_KEY);
+        // Automatic is always first and always available: it is what a fresh
+        // install, and a phone with no DAC attached, falls back to.
+        final String[] ids = new String[devices.size() + 1];
+        final String[] names = new String[devices.size() + 1];
+        ids[0] = "";
+        names[0] = I18n.tr("settings.hifiOutputDevice.auto");
+        int checked = 0;
+        for (int i = 0; i < devices.size(); i++) {
+            UsbDevice device = devices.get(i);
+            String id = device.getDeviceName() != null ? device.getDeviceName() : "";
+            ids[i + 1] = id;
+            names[i + 1] = AndroidUsbAudio.displayName(device);
+            if (!id.isEmpty() && id.equals(current)) checked = i + 1;
+        }
+        // android.app.AlertDialog, not the androidx one: the app runs on
+        // Theme.DeviceDefault (see themes.xml), which an AppCompat dialog
+        // refuses to inflate into.
+        new AlertDialog.Builder(this)
+                .setTitle(I18n.tr("settings.hifiOutputDevice.title"))
+                .setSingleChoiceItems(names, checked, (dialog, which) -> {
+                    settings.put(SettingsCatalog.HIFI_DEVICE_KEY, ids[which]);
+                    dialog.dismiss();
+                })
+                .setNeutralButton(I18n.tr("settings.hifiDevice.refresh"),
+                        (dialog, which) -> showHifiDevicePicker())
+                .setNegativeButton(I18n.tr("common.cancel"), null)
+                .show();
     }
 
     /** Launch the system document picker for a font file ({@link SettingsCore.FontPicker}
@@ -1162,6 +1250,53 @@ public final class QPlayerActivity extends Activity {
         }
     }
 
+    /**
+     * The framework's volume keys act on the stream AudioFlinger is mixing, and an
+     * exclusive USB stream is deliberately not that stream — pressing them would
+     * change a volume nothing is being played through. So while the driver really
+     * holds the DAC the keys belong to the app's own volume instead, which the
+     * driver puts onto the DAC's control, or onto the samples where the DAC has
+     * none.
+     */
+    private boolean volumeKeysGoToDac() {
+        HifiAudioDispatcher backend = sharedBackend;
+        return backend != null && backend.ownsOutputVolume();
+    }
+
+    private static boolean isVolumeKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
+    }
+
+    private void nudgeVolume(boolean louder) {
+        if (controller == null) return;
+        float from = controller.volumeValue();
+        // A sixteenth per press, the framework's own 16-step media volume. The
+        // QML volume HUD is the feedback (it also carries a live slider); the
+        // old toast here is gone because it could not be dragged.
+        float next = Math.max(0f, Math.min(1f, from + (louder ? 0.0625f : -0.0625f)));
+        if (next == from) return;
+        controller.setVolume(next);
+        android.util.Log.i("qplayer.debug",
+                "volume key -> " + Math.round(next * 100f) + "%");
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // Volume keys never reach the Activity's own handlers: the window adjusts
+        // the stream it is mixing on the way through, so it consumes them before
+        // onKeyDown would run. Catch them at dispatch instead. Holding a key
+        // ramps (every fourth auto-repeat steps once).
+        int keyCode = event.getKeyCode();
+        if (isVolumeKey(keyCode) && volumeKeysGoToDac()) {
+            int repeat = event.getRepeatCount();
+            if (event.getAction() == KeyEvent.ACTION_DOWN && (repeat == 0 || repeat % 4 == 0)) {
+                nudgeVolume(keyCode == KeyEvent.KEYCODE_VOLUME_UP);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     @Override
     protected void onDestroy() {
         logSceneLifecycle("destroy");
@@ -1185,6 +1320,7 @@ public final class QPlayerActivity extends Activity {
         if (controller != null && !controller.isPlaying() && !PlaybackService.isRunning()) {
             controller.shutdown();
             sharedController = null;
+            sharedBackend = null;
         }
         if (glView != null) {
             glView.dispose();

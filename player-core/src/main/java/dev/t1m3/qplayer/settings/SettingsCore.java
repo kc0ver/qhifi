@@ -510,6 +510,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY:
                     controller.setHomePlaylistLimit(intOf(SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY));
                     break;
+                case SettingsCatalog.HIFI_ENABLED_KEY:
+                    controller.setHifiEnabled(bool(SettingsCatalog.HIFI_ENABLED_KEY));
+                    break;
+                case SettingsCatalog.HIFI_FOLLOW_RATE_KEY:
+                    controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
+                    break;
+                case SettingsCatalog.HIFI_VOLUME_MODE_KEY:
+                    controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+                    break;
+                case SettingsCatalog.HIFI_DEVICE_KEY:
+                    controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
+                    break;
                 default: break;
             }
         }
@@ -530,6 +542,10 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setHighQualityEnabled(bool("highQuality"));
         controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB"));
         controller.setHomePlaylistLimit(intOf(SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY));
+        controller.setHifiEnabled(bool(SettingsCatalog.HIFI_ENABLED_KEY));
+        controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
+        controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+        controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
     }
 
     private void applyLanguage() {

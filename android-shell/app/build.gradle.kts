@@ -7,13 +7,32 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "dev.t1m3.qplayer"
+        // Fork id: the release build is com.kc0ver.qhifi, debug/perf get the
+        // usual applicationIdSuffix, so all three can sit side by side.
+        applicationId = "com.kc0ver.qhifi"
         minSdk = 26
         targetSdk = 34
         versionCode = 88
-        versionName = "1.8.4"
-        manifestPlaceholders["appLabel"] = "QPlayer"
+        // Tracks the upstream release it is built from, marked as the fork build
+        // ("1.8.4" → "1.8.4-hifi"). The update check ignores the suffix, so a
+        // release of this fork is only "newer" once its numeric part is.
+        versionName = "1.8.4-hifi"
+        manifestPlaceholders["appLabel"] = "QHIFI"
+        // The exclusive USB driver is a native .so; the app is already arm64
+        // in practice (the bundled Skija library is), so the native build
+        // matches it instead of adding a second ABI.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
+
+    // The userspace UAC driver for the EXCLUSIVE mode; see src/main/cpp/.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
@@ -48,7 +67,7 @@ android {
         named("debug") {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            manifestPlaceholders["appLabel"] = "QPlayer (debug)"
+            manifestPlaceholders["appLabel"] = "QHIFI (debug)"
         }
         // Release-speed binary with a side-by-side id, signed by the debug
         // keystore so a local machine without QPLAYER_KEYSTORE can still
@@ -60,7 +79,7 @@ android {
             isDebuggable = false
             matchingFallbacks += "release"
             signingConfig = signingConfigs.getByName("debug")
-            manifestPlaceholders["appLabel"] = "QPlayer (perf)"
+            manifestPlaceholders["appLabel"] = "QHIFI (perf)"
         }
     }
 

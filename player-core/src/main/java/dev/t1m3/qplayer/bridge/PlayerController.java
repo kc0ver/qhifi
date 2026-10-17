@@ -1,6 +1,11 @@
 package dev.t1m3.qplayer.bridge;
 
 import dev.t1m3.qplayer.audio.AudioBackend;
+import dev.t1m3.qplayer.audio.AudioOutputDevice;
+import dev.t1m3.qplayer.audio.AudioOutputStatus;
+import dev.t1m3.qplayer.audio.HifiCapabilities;
+import dev.t1m3.qplayer.audio.HifiOutputControl;
+import dev.t1m3.qplayer.audio.HifiOutputMode;
 import dev.t1m3.qplayer.audio.MetadataReader;
 import dev.t1m3.qplayer.cache.DiskCache;
 import dev.t1m3.qplayer.cache.PlaylistCacheIndex;
@@ -137,6 +142,15 @@ public final class PlayerController {
     private static final String DEFAULT_SEED = "#6750A4";
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "qplayer-net");
+        t.setDaemon(true);
+        return t;
+    });
+    /** Chain probes (device enumeration, source header, capability bits) run here
+     *  rather than on {@link #worker}: that queue also carries plugin-catalog and
+     *  cover downloads, and a slow one must not leave the HiFi tab showing stale
+     *  or empty values for as long as the download takes. */
+    private final ExecutorService hifiWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "qplayer-hifi-probe");
         t.setDaemon(true);
         return t;
     });
@@ -561,6 +575,52 @@ public final class PlayerController {
     /** Current disk cache usage in MB (updated after each cache write). */
     public final Property<Long> cacheSizeMB = new Property<>(0L);
 
+    // --- HiFi output (Android; read-only chain readout) -------------------
+    // Everything below mirrors what a backend that implements HifiOutputControl
+    // reports. They are plain read-outs: the settings that steer the backend
+    // live in SettingsCore, and this class only forwards them (see
+    // setHifiEnabled & co). A backend without the interface leaves hifiSupported
+    // false and every value empty, which the settings page renders as
+    // "unsupported" rather than as silently missing data.
+    /** Whether the output path itself is available (backend and platform). */
+    public final Property<Boolean> hifiSupported = new Property<>(false);
+    /** What the settings ask for, as a {@link HifiOutputMode} index; only ever
+     *  SYSTEM or EXCLUSIVE, reported by the backend (there is no dropdown). */
+    public final Property<Integer> hifiOutputMode = new Property<>(HifiOutputMode.SYSTEM.id());
+    /** What is actually being used; differs from {@link #hifiOutputMode} when the
+     *  requested mode cannot work here (see {@link #hifiFallbackReason}). */
+    public final Property<Integer> hifiEffectiveMode = new Property<>(HifiOutputMode.SYSTEM.id());
+    /** {@link AudioOutputStatus#EXCLUSIVE_NONE} / PARTIAL / FULL. */
+    public final Property<String> hifiExclusiveState =
+            new Property<>(AudioOutputStatus.EXCLUSIVE_NONE);
+    /** Why the requested mode was not used, "" when it was. */
+    public final Property<String> hifiFallbackReason = new Property<>("");
+    /** Capability bits, so the chain card can say what this device can do. */
+    public final Property<Boolean> hifiBitPerfectSupported = new Property<>(false);
+    public final Property<Boolean> hifiUsbDevicePresent = new Property<>(false);
+    /** Whether the user asked for the direct path. */
+    public final Property<Boolean> hifiEnabled = new Property<>(false);
+    /** Whether a bit-perfect stream is in effect right now. */
+    public final Property<Boolean> hifiBitPerfectActive = new Property<>(false);
+    /** Name of the route the sound is on, e.g. "iBasso DC03". */
+    public final Property<String> hifiDeviceName = new Property<>("");
+    public final Property<String> hifiRouteType = new Property<>("builtin");
+    /** Source format for the chain card, e.g. "FLAC 24bit/96kHz"; "" when the
+     *  source's header hasn't been inspected (network streams). */
+    public final Property<String> hifiSourceFormat = new Property<>("");
+    /** Negotiated output format, e.g. "48kHz/16bit". */
+    public final Property<String> hifiOutputFormat = new Property<>("");
+    public final Property<Boolean> hifiResampled = new Property<>(false);
+    /** Why the direct path is unavailable, "" while it is fine. */
+    public final Property<String> hifiReason = new Property<>("");
+    /** What the volume slider drives right now: "hardware" (the DAC's own
+     *  control), "software" (a digital gain), or "" when unknown. The volume
+     *  readout labels itself with this. */
+    public final Property<String> hifiVolumeKind = new Property<>("");
+    /** Routes the picker offers, automatic first. */
+    public final Property<List<AudioOutputDevice>> hifiDevices =
+            new Property<>(Collections.<AudioOutputDevice>emptyList());
+
     // --- Local library ----------------------------------------------------
     public final Property<List<Track>> tracks = new Property<>(Collections.<Track>emptyList());
     public final Property<Integer> libraryCount = new Property<>(0);
@@ -973,6 +1033,9 @@ public final class PlayerController {
             }
             notifyPlayback();
             startFadeIn();
+            // The source's own format is only known once it actually opened, so
+            // this is the first moment the chain readout can be accurate for it.
+            refreshHifiStatus();
         });
         // Audio-focus driven pause/resume (phone call, another player): keep the
         // intended-play state, the UI, and the media session in sync.
@@ -1020,6 +1083,9 @@ public final class PlayerController {
             loggedIn.set(true);
             refreshLogin();
         }
+        // Publish the chain (route, formats, capability) before the first track
+        // starts, so the settings page's HiFi tab is never blank on a fresh launch.
+        refreshHifiStatus();
     }
 
     /** Enable/disable an installed provider without coupling it to a QML scene. */
@@ -2892,11 +2958,11 @@ public final class PlayerController {
     // release, compare its tag against the running version, and (if newer) expose
     // the version + release notes + download url so QML pops an update dialog.
 
-    /** Latest GitHub release endpoint for the qplayer repo. gh-proxy.com proxies
+    /** Latest GitHub release endpoint for this fork's repo. gh-proxy.com proxies
      *  api.github.com too, so with the mirror on the whole flow (check + download)
      *  works on mainland networks where api.github.com is unreliable. */
     private static final String RELEASE_API =
-            "https://api.github.com/repos/TIMER-err/qplayer/releases/latest";
+            "https://api.github.com/repos/kc0ver/qhifi/releases/latest";
     /** When true, application and plugin GitHub downloads prefer proxy URLs. */
     private volatile boolean updateMirror = false;
 
@@ -5557,6 +5623,13 @@ public final class PlayerController {
         return propertyPosition != null ? Math.max(0L, propertyPosition) : 0L;
     }
 
+    /** The user's own level, 0..1 — what {@link #setVolume} last accepted. A host
+     *  that adjusts it without the QML slider (the Android volume keys) has to read
+     *  it to step from the value actually in use. */
+    public float volumeValue() {
+        return userVolume;
+    }
+
     public void setVolume(float v) {
         float clamped = Math.max(0f, Math.min(1f, v));
         userVolume = clamped;
@@ -5583,6 +5656,173 @@ public final class PlayerController {
         if (!enabled) {
             cancelFadeAtGain(1f);
         }
+    }
+
+    // --- HiFi output ------------------------------------------------------
+
+    /** Settings toggle: prefer the direct output path. The backend decides what
+     *  it can actually do; a backend without {@link HifiOutputControl} ignores
+     *  this and the UI keeps reporting the system path. */
+    public void setHifiEnabled(boolean on) {
+        hifiEnabled.set(on);
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.setHifiEnabled(on);
+        refreshHifiStatus();
+    }
+
+    /** Settings toggle: output at the source's own rate rather than the mix rate. */
+    public void setHifiFollowSampleRate(boolean on) {
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.setFollowSampleRate(on);
+        refreshHifiStatus();
+    }
+
+    /** Settings pick: which end the volume slider drives on an exclusive stream,
+     *  0 = hardware (software locked at 100%), 1 = software (hardware at max). */
+    public void setHifiVolumeMode(int mode) {
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.setVolumeMode(mode == 1 ? 1 : 0);
+        refreshHifiStatus();
+    }
+
+    /** Settings pick: force playback onto a device id, "" for automatic. */
+    public void setHifiOutputDevice(String deviceId) {
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.selectOutputDevice(deviceId != null ? deviceId : "");
+        refreshHifiStatus();
+    }
+
+    /** Chain-card refresh button: re-enumerate the output-device list. */
+    public void refreshHifiDevices() {
+        refreshHifiStatus();
+    }
+
+    /** Chain-card refresh button: re-read the chain status (route, formats, state). */
+    public void refreshHifiChain() {
+        refreshHifiStatus();
+    }
+
+    /**
+     * Re-read the chain and publish it to the Properties. Cheap to call — the
+     * real work happens on the worker, and the results land on the render thread
+     * the same way every other cross-thread update here does (enumerating output
+     * devices and re-reading a source's header are both slow enough to jank a
+     * frame if done inline).
+     */
+    public void refreshHifiStatus() {
+        final HifiOutputControl hifi = hifiControl();
+        if (hifi == null) {
+            post(() -> {
+                hifiSupported.set(false);
+                hifiBitPerfectActive.set(false);
+                hifiDeviceName.set("");
+                hifiRouteType.set(AudioOutputDevice.ROUTE_BUILTIN);
+                hifiSourceFormat.set("");
+                hifiOutputFormat.set("");
+                hifiResampled.set(false);
+                hifiReason.set(I18n.tr("settings.hifiChain.reason.unsupported"));
+                hifiDevices.set(Collections.<AudioOutputDevice>emptyList());
+                hifiBitPerfectSupported.set(false);
+                hifiUsbDevicePresent.set(false);
+                hifiOutputMode.set(HifiOutputMode.SYSTEM.id());
+                hifiEffectiveMode.set(HifiOutputMode.SYSTEM.id());
+                hifiExclusiveState.set(AudioOutputStatus.EXCLUSIVE_NONE);
+                hifiFallbackReason.set("");
+                hifiVolumeKind.set("");
+            });
+            return;
+        }
+        hifiWorker.submit(() -> {
+            final List<AudioOutputDevice> devices;
+            final AudioOutputStatus status;
+            final HifiCapabilities capabilities;
+            try {
+                devices = hifi.outputDevices();
+                status = hifi.outputStatus();
+                capabilities = hifi.capabilities();
+            } catch (Throwable e) {
+                // A device that went away mid-query must not take playback (or the
+                // settings page) down with it — report "unsupported" and move on.
+                Logger.warn("hifi status query failed: {}", e.toString());
+                post(() -> {
+                    hifiSupported.set(false);
+                    hifiReason.set(I18n.tr("settings.hifiChain.reason.unsupported"));
+                    hifiDevices.set(Collections.<AudioOutputDevice>emptyList());
+                });
+                return;
+            }
+            post(() -> applyHifiStatus(devices, status, capabilities));
+        });
+    }
+
+    /** Render-thread sink for {@link #refreshHifiStatus()}. */
+    private void applyHifiStatus(List<AudioOutputDevice> devices, AudioOutputStatus status,
+                                 HifiCapabilities capabilities) {
+        // "Supported" here means the host offers the feature at all; what it can
+        // actually do on this device is the capability bits below.
+        hifiSupported.set(true);
+        hifiDevices.set(devices != null ? devices : Collections.<AudioOutputDevice>emptyList());
+        hifiBitPerfectSupported.set(capabilities != null && capabilities.bitPerfectSupported);
+        hifiUsbDevicePresent.set(capabilities != null && capabilities.usbOutputPresent);
+        if (status == null) {
+            hifiBitPerfectActive.set(false);
+            hifiSourceFormat.set("");
+            hifiOutputFormat.set("");
+            hifiResampled.set(false);
+            hifiReason.set("");
+            hifiOutputMode.set(HifiOutputMode.SYSTEM.id());
+            hifiEffectiveMode.set(HifiOutputMode.SYSTEM.id());
+            hifiExclusiveState.set(AudioOutputStatus.EXCLUSIVE_NONE);
+            hifiFallbackReason.set("");
+            hifiVolumeKind.set("");
+            return;
+        }
+        hifiDeviceName.set(status.deviceName);
+        hifiRouteType.set(status.routeType);
+        hifiBitPerfectActive.set(status.bitPerfectActive);
+        hifiSourceFormat.set(formatRate(status.sourceEncoding, status.sourceBitDepth,
+                status.sourceSampleRate));
+        hifiOutputFormat.set(formatRate(status.outputEncoding, status.outputBitDepth,
+                status.outputSampleRate));
+        hifiResampled.set(status.resampled);
+        hifiReason.set(status.reason);
+        // The mode readouts come from the dispatcher's own report, not from any
+        // user dropdown: they are only ever SYSTEM or EXCLUSIVE.
+        hifiOutputMode.set(status.requestedMode.id());
+        hifiEffectiveMode.set(status.effectiveMode.id());
+        hifiExclusiveState.set(status.exclusiveState);
+        hifiFallbackReason.set(status.fallbackReason);
+        hifiVolumeKind.set(status.volumeKind);
+        if (status.deviceVolume >= 0) {
+            // The DAC's own level at open is the truth: adopt it so the slider,
+            // the volume keys and the device agree from the first press after a
+            // switch. Without this, exclusive open would keep the app's stored
+            // level and the first adjustment would jump loudness.
+            userVolume = status.deviceVolume;
+            volume.set(status.deviceVolume);
+        }
+    }
+
+    /** "FLAC 24bit/96kHz" / "48kHz/16bit" — the two "unknown" cases collapse
+     *  (a source header nobody read is reported as empty rather than as a
+     *  fabricated rate). */
+    private static String formatRate(String encoding, int bitDepth, int sampleRate) {
+        StringBuilder sb = new StringBuilder();
+        if (encoding != null && !encoding.isEmpty()) sb.append(encoding).append(' ');
+        if (bitDepth > 0) sb.append(bitDepth).append("bit");
+        if (sampleRate > 0) {
+            if (bitDepth > 0) sb.append('/');
+            sb.append(sampleRate % 1000 == 0 ? sampleRate / 1000 : sampleRate);
+            if (sampleRate % 1000 == 0) sb.append("kHz");
+            else sb.append("Hz");
+        }
+        return sb.toString();
+    }
+
+    /** The backend's HiFi capability, or null when this host's backend has none
+     *  (desktop, and any Android path that never opted in). */
+    private HifiOutputControl hifiControl() {
+        return backend instanceof HifiOutputControl ? (HifiOutputControl) backend : null;
     }
 
     /** Load a netease track's lyrics off-thread (AMLL TTML mirror, else Netease's
@@ -9787,6 +10027,7 @@ public final class PlayerController {
         retryWorker.shutdownNow();
         monetFetchWorker.shutdownNow();
         monetWorker.shutdownNow();
+        hifiWorker.shutdownNow();
         pluginManager.close();
         pluginHostApi.close();
     }

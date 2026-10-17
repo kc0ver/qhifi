@@ -36,3 +36,22 @@ desktop-host/src/main/java/dev/t1m3/qplayer/desktop/tools/
 # test JVM occasionally dies and drops these in the repo root.
 hs_err_pid*.log
 replay_pid*.log
+
+# workspace scratch (local only)
+.tmp/
+*.apk
+
+# native / gradle build outputs
+cxx/
+build/
+.gradle/
+externalNativeBuild/
+captures/
+target/
+local.properties
+*.iml
+.idea/
+
+# workspace scratch (local only)
+.tmp/
+*.apk

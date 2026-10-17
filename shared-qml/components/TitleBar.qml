@@ -32,7 +32,7 @@ Rectangle {
         anchors.left: appIcon.right
         anchors.leftMargin: 8
         anchors.verticalCenter: parent.verticalCenter
-        text: "QPlayer"
+        text: "QHIFI"
         font.family: Theme.typography.labelLarge.family
         font.pixelSize: Theme.typography.labelLarge.size
         color: Theme.color.onSurfaceColor
