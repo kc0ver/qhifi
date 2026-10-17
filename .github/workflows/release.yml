@@ -99,16 +99,21 @@ jobs:
           cd android-shell && ./gradlew --no-daemon :app:assembleRelease
 
       - name: Stage APK
+        # The file carries the release tag so a downloaded APK identifies itself;
+        # a manual dispatch has no tag and falls back to the branch name.
+        env:
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           mkdir -p out
           dir=android-shell/app/build/outputs/apk/release
           apk="$dir/app-release.apk"
           [ -f "$apk" ] || apk="$dir/app-release-unsigned.apk"
-          cp "$apk" "out/QPlayer-android.apk"
+          [ -n "$TAG" ] || TAG=unreleased
+          cp "$apk" "out/QHIFI-${TAG}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: QPlayer-android
+          name: QHIFI-android
           path: out/*
 
       - name: Attach to release
