@@ -6,6 +6,7 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioTrack;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
@@ -52,7 +53,6 @@ final class AndroidDirectAudioBackend implements AudioBackend {
 
     private static final long STALL_CHECK_MS = 2500L;
     private static final long STALL_TIMEOUT_MS = 3000L;
-    private static final long DRAIN_TIMEOUT_MS = 3000L;
     private static final int MAX_RESTARTS_PER_SOURCE = 3;
     private static final long OPEN_PROBE_TIMEOUT_MS = 1500L;
 
@@ -124,6 +124,9 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     private boolean playingStarted;
     /** Whether the loop has already told the sink to play for this source. */
     private boolean sinkPlaying;
+    /** Set when a track reached its own end: the ring still holds its tail, so the
+     *  next source must NOT flush it — the tail is the gapless hand-off. */
+    private boolean tailCarriesOver;
     private int volumePercent = 80;
     private AudioFocusRequest focusRequest;
     private boolean hasFocus;
@@ -173,6 +176,15 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         if (!(sink instanceof UsbIsoSink) || !sink.exclusive()) return "";
         return ((UsbIsoSink) sink).hasHardwareVolume()
                 && ((UsbIsoSink) sink).volumeModeIsHardware() ? "hardware" : "software";
+    }
+
+    /** Live: true while the slider really drives the DAC's own control on the open
+     *  stream (so the perceptual volume curve must NOT be applied on top — that
+     *  level is already a dB mapping). False everywhere else. */
+    boolean hardwareVolumeActive() {
+        return sink instanceof UsbIsoSink && sink.exclusive()
+                && ((UsbIsoSink) sink).hasHardwareVolume()
+                && ((UsbIsoSink) sink).volumeModeIsHardware();
     }
 
     /** Generation of the last sink open; the dispatcher compares this to what it
@@ -227,14 +239,205 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         restarts = 0;
         requestFocus();
         startDecoder();
+        startKeepAliveTrack();
+    }
+
+    // --- silent keep-alive track (experiment) -------------------------------
+
+    /** Experimental, off by default: hold a silent framework AudioTrack for as
+     *  long as this exclusive stream plays. This backend bypasses AudioFlinger
+     *  entirely — nothing about our playback exists in the platform's audio
+     *  bookkeeping — and some ROMs suspend a process they cannot see playing
+     *  audio, which shows up as "session says playing, output is silent" after the
+     *  app goes to the background. A zero-filled track at volume 0 keeps us on the
+     *  platform's own player list (the position a framework-playing app is always
+     *  in), without making a sound. */
+    private volatile boolean keepAliveEnabled;
+    /** A silent track is believed to be up right now. */
+    private volatile boolean keepAliveUp;
+    /** Bumped to retire a running keep-alive loop (and never let it clear the
+     *  bookkeeping of a newer one). */
+    private volatile int keepAliveGeneration;
+    private volatile Thread keepAliveThread;
+
+    void setKeepAliveTrack(boolean on) {
+        keepAliveEnabled = on;
+        if (!on) {
+            stopKeepAliveTrack();
+            return;
+        }
+        boolean playing;
+        synchronized (lock) {
+            playing = desiredPlaying && !closed;
+        }
+        if (playing) startKeepAliveTrack();
+    }
+
+    private void startKeepAliveTrack() {
+        if (!keepAliveEnabled) return;
+        final int generation;
+        synchronized (lock) {
+            if (keepAliveUp || closed) return;
+            keepAliveUp = true;
+            generation = ++keepAliveGeneration;
+        }
+        Thread thread = new Thread(() -> keepAliveLoop(generation), "qplayer-keepalive");
+        thread.setDaemon(true);
+        keepAliveThread = thread;
+        thread.start();
+    }
+
+    private void stopKeepAliveTrack() {
+        synchronized (lock) {
+            if (!keepAliveUp) return;
+            keepAliveUp = false;
+            keepAliveGeneration++;
+        }
+        Thread thread = keepAliveThread;
+        keepAliveThread = null;
+        if (thread != null) thread.interrupt();
+    }
+
+    private void keepAliveLoop(int generation) {
+        try {
+            int attempt = 0;
+            while (!closed && keepAliveGeneration == generation) {
+                attempt++;
+                if (runKeepAliveTrack(generation, attempt)) return;
+                if (closed || keepAliveGeneration != generation) return;
+                // The track died (a write error, or the system stopped it). Rebuild
+                // after a short back-off: this track's whole job is to stay present
+                // in the platform's bookkeeping for hours of background playback,
+                // so one transient failure must not end that protection for the
+                // rest of the session — the ROM freeze comes back the moment it is
+                // gone, and the symptom (silent until the screen wakes) is exactly
+                // what a long run reported.
+                Logger.warn("keepalive: silent track died (attempt {}); rebuilding", attempt);
+                sleepQuietly(Math.min(5000L, 1000L * attempt));
+            }
+        } finally {
+            synchronized (lock) {
+                // Only the current generation owns the flag; a newer keep-alive
+                // that started while this one was tearing down must not be cleared.
+                if (keepAliveGeneration == generation) keepAliveUp = false;
+            }
+            Logger.info("keepalive: silent track down");
+        }
+    }
+
+    /** Runs one silent track until it is stopped on purpose.
+     *  @return true when the loop should end (the keep-alive was switched off, or
+     *  the backend is closing); false when the track died and wants a rebuild. */
+    private boolean runKeepAliveTrack(int generation, int attempt) {
+        AudioTrack track = null;
+        try {
+            final int rate = 48000;
+            int minBytes = AudioTrack.getMinBufferSize(rate,
+                    AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
+            // A roomy buffer (>=1s): the feeder below writes ~200ms of silence per
+            // pass, so the buffer never becomes the reason a write blocks.
+            int bufferBytes = Math.max(minBytes > 0 ? minBytes : 8192,
+                    rate * 2 /*stereo*/ * 2 /*bytes*/);
+            track = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(rate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                            .build())
+                    .setBufferSizeInBytes(bufferBytes)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+            // Deliberately NO setPreferredDevice: selecting a device for a media
+            // track lands in AudioPolicyManager::setOutputDevice(force=true) and
+            // moves the media strategy's output for EVERY client — pinning this
+            // track to the speaker sent other apps' audio there too. Left alone,
+            // the track follows the system's own routing (the USB DAC, the device
+            // the policy prefers), which is exactly where it must stay: the DAC is
+            // held by us, so the attempt fails and nobody hears anything.
+            track.setVolume(0f);
+            track.play();
+            Logger.info("keepalive: silent track up ({}Hz {}B, following system routing{})",
+                    rate, bufferBytes, attempt > 1 ? ", rebuild #" + (attempt - 1) : "");
+            byte[] zeros = new byte[rate * 2 /*stereo*/ * 2 /*bytes*/ / 5 /*200ms*/];
+            long lastLog = System.currentTimeMillis();
+            int idlePasses = 0;
+            while (!closed && keepAliveGeneration == generation) {
+                // Non-blocking on purpose: a blocking write on an output that stops
+                // consuming would hang this loop forever, and then the protection
+                // this track provides would be silently gone with nobody noticing.
+                // Non-blocking + a nap keeps the feed at roughly realtime and keeps
+                // the health checks below running no matter what the output does.
+                int written = track.write(zeros, 0, zeros.length, AudioTrack.WRITE_NON_BLOCKING);
+                if (written < 0) {
+                    Logger.warn("keepalive: write failed: {}", written);
+                    return false;
+                }
+                if (written < zeros.length) idlePasses++;
+                sleepQuietly(200L);
+                if (System.currentTimeMillis() - lastLog >= 15000L) {
+                    lastLog = System.currentTimeMillis();
+                    int state = track.getPlayState();
+                    Logger.info("keepalive: alive playState={} routed={} otherMusicActive={} fullPasses={}",
+                            state, routedDeviceName(track),
+                            audioManager != null && audioManager.isMusicActive(), idlePasses);
+                    idlePasses = 0;
+                    // A stream track we keep feeding must stay PLAYING; if the system
+                    // stopped it (output revoked, HAL reconfigured), it no longer
+                    // counts for anything and has to be rebuilt.
+                    if (state == AudioTrack.PLAYSTATE_STOPPED) {
+                        Logger.warn("keepalive: track was stopped by the system");
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (Throwable e) {
+            Logger.warn("keepalive: track failed: {}", e.toString());
+            return false;
+        } finally {
+            if (track != null) {
+                try {
+                    track.stop();
+                } catch (Throwable ignored) {
+                }
+                try {
+                    track.release();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /** The device this silent track actually ended up on, for the heartbeat: it is
+     *  a diagnostic, so an unreadable answer is reported as a dash rather than
+     *  failing the keep-alive. */
+    private static String routedDeviceName(AudioTrack track) {
+        try {
+            AudioDeviceInfo device = track.getRoutedDevice();
+            return device != null ? AndroidHifiProbe.productName(device) : "-";
+        } catch (Throwable e) {
+            return "-";
+        }
     }
 
     @Override
     public void pause() {
         synchronized (lock) {
             desiredPlaying = false;
+            // A user pause cancels a pending call-resume: a call that ends later
+            // must not start the music again by itself.
+            resumeOnGain = false;
         }
+        focusRetryAttempts = 0;
+        callConfirmPending = false;
+        watchdogHandler.removeCallbacks(focusCallRetry);
+        watchdogHandler.removeCallbacks(callConfirm);
         watchdogHandler.removeCallbacks(stallCheck);
+        stopKeepAliveTrack();
         releaseWifiLock();
         releaseWakeLock();
         sink.pause();
@@ -251,6 +454,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         holdWifiLock();
         acquireWakeLock();
         scheduleStallCheck();
+        startKeepAliveTrack();
         fire(onResumed);
     }
 
@@ -354,7 +558,9 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     @Override
     public void release() {
         watchdogHandler.removeCallbacks(stallCheck);
-        watchdogHandler.removeCallbacks(focusResumeCheck);
+        watchdogHandler.removeCallbacks(focusCallRetry);
+        watchdogHandler.removeCallbacks(callConfirm);
+        stopKeepAliveTrack();
         releaseWifiLock();
         releaseWakeLock();
         Thread thread;
@@ -471,6 +677,14 @@ final class AndroidDirectAudioBackend implements AudioBackend {
      * why every branch below sees a request exactly once.
      */
     private void decodeLoop() {
+        // A background app's threads are shared out aggressively; a decoder that
+        // loses that race starves the ring and the DAC goes quiet. Ask for the
+        // audio priority — the same defense the USB feeder thread already has, and
+        // a no-op where the kernel refuses it.
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+        } catch (Throwable ignored) {
+        }
         MediaExtractor extractor = null;
         MediaCodec codec = null;
         final MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
@@ -491,11 +705,14 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                     // A reopen (the cache-file switch) keeps the ring — its
                     // buffered audio is the same position, and it plays on while
                     // the decoder re-primes, which is exactly what hides the
-                    // switch that used to be heard as a stutter.
+                    // switch that used to be heard as a stutter. A track that
+                    // ended on its own keeps its tail too: that tail IS the
+                    // hand-off into this source.
                     if (pending.serial != serial && pending.reopenFromMs < 0L
-                            && sink.isOpen()) {
+                            && sink.isOpen() && !tailCarriesOver) {
                         sink.flush();
                     }
+                    tailCarriesOver = false;
                     closeMedia(codec, extractor);
                     codec = null;
                     extractor = null;
@@ -559,14 +776,17 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 }
                 if (outputDone) {
                     long finished = pending.serial;
-                    drainSink();
                     closeMedia(codec, extractor);
                     codec = null;
                     extractor = null;
                     serial = -1L;
-                    finishSource(finished);
                     // The source is over but nothing new has been requested yet:
                     // wait rather than reopening it, which would replay the track.
+                    // The sink is deliberately left running — what is still in its
+                    // ring is this track's real tail, and the next source's PCM is
+                    // appended right behind it, which is what removes the silence
+                    // between two consecutive same-format tracks.
+                    tailCarriesOver = finishSourceKeepingTail(finished);
                     awaitNewSerial(finished);
                     continue;
                 }
@@ -584,6 +804,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         } finally {
             closeMedia(codec, extractor);
             sink.close();
+            stopKeepAliveTrack();
             releaseWakeLock();
             releaseWifiLock();
             synchronized (lock) {
@@ -621,16 +842,36 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         long reopenFromMs = -1L;
     }
 
+    /** How long the wake/wifi locks (and the silent keep-alive track) outlive a
+     *  finished source while the next one is on its way. Generous on purpose: an
+     *  online track's hand-off includes a network resolve, and the moment the
+     *  process goes idle at a track boundary is exactly when a ROM freezes a
+     *  background app — a 3s window left playback silent until the screen came
+     *  back on. 30s still covers the "queue really ended" case without holding a
+     *  wake lock indefinitely. */
+    private static final long HANDOFF_HOLD_MS = 30_000L;
+
     /** Wait until a newer request arrives, so a finished or failed source does not
-     *  spin and does not replay itself. */
+     *  spin and does not replay itself. The wake/wifi locks (and the silent
+     *  keep-alive track) are held for {@link #HANDOFF_HOLD_MS} first — the hand-off
+     *  to the next source normally takes milliseconds, but it may include a network
+     *  resolve, and the idle moment right after it must not become a freeze window. */
     private void awaitNewSerial(long serial) {
         watchdogHandler.removeCallbacks(stallCheck);
-        releaseWakeLock();
-        releaseWifiLock();
+        long releaseAt = System.currentTimeMillis() + HANDOFF_HOLD_MS;
+        boolean released = false;
         sleepQuietly(100L);
         while (true) {
             synchronized (lock) {
                 if (closed || wantedSerial != serial) return;
+            }
+            if (!released && System.currentTimeMillis() >= releaseAt) {
+                released = true;
+                releaseWakeLock();
+                releaseWifiLock();
+                // Nothing followed the finished source: the session really is over,
+                // so the silent keep-alive track goes down with the locks.
+                stopKeepAliveTrack();
             }
             sleepQuietly(100L);
         }
@@ -805,7 +1046,12 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 outputBitDepth = sink instanceof UsbIsoSink
                         ? ((UsbIsoSink) sink).bitDepth() : 0;
                 positionBaseFrames = sink.framesWritten();
-                adoptedVolume01 = volume / 100f;
+                // Nothing is adopted from a REUSED sink: its level has not changed,
+                // and the value used here is the app's own level (a digital gain in
+                // software mode, which is NOT the same scale as a slider position).
+                // Reporting it made the volume slider jump to the gain value on
+                // every track switch that reopened nothing.
+                adoptedVolume01 = -1f;
                 openGen++;
             }
             sink.setVolume(volume / 100f);
@@ -825,11 +1071,12 @@ final class AndroidDirectAudioBackend implements AudioBackend {
             positionBaseFrames = sink.framesWritten();
         }
         // Open-time volume: switching to exclusive must never change loudness by
-        // itself. Hardware mode ADOPTS whatever level the DAC's buttons left it
-        // at (readable only before the isochronous stream starts); when that
-        // fails, open at a safe 30% instead of the stored app level. Software
-        // mode pins the hardware at max, so its first write is capped at 40%.
-        float reported;
+        // itself. Hardware mode ADOPTS whatever level the DAC's buttons left it at
+        // (readable only before the isochronous stream starts); when that read
+        // fails, hold the level the app last asked for rather than inventing one.
+        // Software mode never writes the DAC at all and owns the level entirely
+        // through the digital gain, so its value is re-asserted unchanged.
+        float reported = -1f;   // nothing adopted unless a hardware level was read
         if (sink instanceof UsbIsoSink
                 && ((UsbIsoSink) sink).volumeModeIsHardware()) {
             float adopted = ((UsbIsoSink) sink).adoptedVolume();
@@ -838,16 +1085,18 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 Logger.info("hifi open volume: adopted device level {}%",
                         Math.round(adopted * 100));
             } else {
-                reported = 0.30f;
-                sink.setVolume(reported);
-                Logger.info("hifi open volume: device level unreadable, safe 30%");
+                float keep = volume / 100f;
+                sink.setVolume(keep);
+                Logger.info("hifi open volume: device level unreadable, keeping app level {}%",
+                        Math.round(keep * 100));
             }
         } else {
-            reported = Math.min(volume / 100f, 0.40f);
-            sink.setVolume(reported);
+            // The digital gain the app pushed; not clamped — a clamp here is what
+            // quietly overrode the user's setting on an open.
+            sink.setVolume(volume / 100f);
         }
         synchronized (lock) {
-            volumePercent = Math.round(reported * 100f);
+            if (reported >= 0) volumePercent = Math.round(reported * 100f);
             adoptedVolume01 = reported;
             openGen++;
         }
@@ -958,29 +1207,26 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
     }
 
-    /** Let the sink play out what it still holds before the track is called over. */
-    private void drainSink() {
-        long deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MS;
-        while (System.currentTimeMillis() < deadline && sink.bufferedFrames() > 0) {
-            sleepQuietly(20L);
-        }
-    }
-
     /** The source ended: report completion once, unless a newer request has
-     *  already replaced this one. */
-    private void finishSource(long serial) {
+     *  already replaced this one. The sink is deliberately NOT paused: the ring
+     *  still holds this track's tail, and letting it play on is what makes the
+     *  hand-off to the next source gapless (the ring also buys the controller
+     *  the time to hand that source over). The wake/wifi locks are deliberately
+     *  kept for now for the same reason — letting the process go idle at a track
+     *  boundary is exactly the window a ROM uses to freeze background playback;
+     *  {@link #awaitNewSerial} releases them if nothing follows.
+     *  @return true when completion was reported and the tail is live. */
+    private boolean finishSourceKeepingTail(long serial) {
         synchronized (lock) {
-            if (closed || wantedSerial != serial) return;
+            if (closed || wantedSerial != serial) return false;
             desiredPlaying = false;
             opened = false;
             positionBaseMs = durationMs;
             positionBaseFrames = sink.framesWritten();
         }
         watchdogHandler.removeCallbacks(stallCheck);
-        releaseWifiLock();
-        releaseWakeLock();
-        sink.pause();
         fire(onComplete);
+        return true;
     }
 
     private void scheduleStallCheck() {
@@ -1099,7 +1345,9 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     }
 
     private void abandonFocus() {
-        watchdogHandler.removeCallbacks(focusResumeCheck);
+        watchdogHandler.removeCallbacks(focusCallRetry);
+        callConfirmPending = false;
+        watchdogHandler.removeCallbacks(callConfirm);
         if (audioManager != null && focusRequest != null) {
             try {
                 audioManager.abandonAudioFocusRequest(focusRequest);
@@ -1111,28 +1359,59 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         resumeOnGain = false;
     }
 
-    /** Scheduled after a full focus LOSS: OEM builds (ColorOS among them) send
-     *  LOSS when the screen turns off and never send GAIN back, which used to
-     *  strand background playback silent until the app was reopened. Re-check
-     *  shortly after: if nothing else is actually making sound, the loss was
-     *  phantom and the intent to play stands — take focus again and resume. A
-     *  real handover (another player, a video) leaves the music stream active
-     *  and we stay paused. Transient losses (calls) wait for GAIN as usual. */
-    private final Runnable focusResumeCheck = new Runnable() {
-        @Override public void run() {
-            reassertFocusResume();
-        }
-    };
+    /** After a TRANSIENT loss (a call) we wait for GAIN. OEM builds do not always
+     *  send it back, so poll instead: while we still intend to play and the phone
+     *  is not actually in a call, resume. Capped only as hygiene — a long call is
+     *  guarded by the in-call check, and a user pause cancels the poll outright. */
+    private static final long FOCUS_RETRY_INTERVAL_MS = 2000L;
+    private static final int FOCUS_RETRY_LIMIT = 300;
+    /** How long a focus loss is given to prove itself a call before being ignored. */
+    private static final long CALL_CONFIRM_MS = 600L;
+    private int focusRetryAttempts;
+    private boolean callConfirmPending;
 
-    private void reassertFocusResume() {
+    private final Runnable focusCallRetry = this::retryTransientLoss;
+    private final Runnable callConfirm = this::confirmCallPause;
+
+    private void retryTransientLoss() {
         if (audioManager == null) return;
         boolean want;
         synchronized (lock) {
             want = resumeOnGain && !closed;
         }
-        if (!want || audioManager.isMusicActive()) return;
+        if (!want) return;
+        if (focusRetryAttempts >= FOCUS_RETRY_LIMIT) return;
+        focusRetryAttempts++;
+        if (inCall()) {
+            // Still on the call: the GAIN that ends it is the real trigger; this
+            // poll is only the net for builds that forget to send it.
+            scheduleFocusCallRetry();
+            return;
+        }
+        // Take the focus back if the ROM offers it, but resume either way: this
+        // stream does not need the grant to make sound, and waiting for one is
+        // what left playback stranded silent when the ROM refuses it to a
+        // background app (ColorOS does exactly that).
         requestFocus();
-        if (!hasFocus) return;
+        resumeFromFocus();
+    }
+
+    private void scheduleFocusCallRetry() {
+        watchdogHandler.removeCallbacks(focusCallRetry);
+        watchdogHandler.postDelayed(focusCallRetry, FOCUS_RETRY_INTERVAL_MS);
+    }
+
+    private boolean inCall() {
+        try {
+            int mode = audioManager.getMode();
+            return mode == AudioManager.MODE_IN_CALL
+                    || mode == AudioManager.MODE_IN_COMMUNICATION;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    private void resumeFromFocus() {
         float volume;
         synchronized (lock) {
             volume = volumePercent / 100f;
@@ -1148,67 +1427,103 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
     }
 
+    /** Focus policy: a real interruption is the only thing that may pause us.
+     *  A full LOSS (another player starting, the screen going off) and a transient
+     *  duck are otherwise ignored — nothing another app plays may stop or quiet our
+     *  stream. "Interruption" is decided by the phone actually being in a call, not
+     *  by which event name the ROM chose (they disagree): a call must pause, a
+     *  notification or an OEM background transition must not. */
     private void onFocusChange(int change) {
+        Logger.info("focus event {} (direct)", focusEventName(change));
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
-                // Full loss: pause now, then re-check (see reassertFocusResume).
-                hasFocus = false;
-                if (isPlaying()) {
-                    resumeOnGain = true;
-                    synchronized (lock) {
-                        desiredPlaying = false;
-                    }
-                    sink.pause();
-                    fire(onPaused);
-                }
-                if (resumeOnGain) {
-                    watchdogHandler.removeCallbacks(focusResumeCheck);
-                    watchdogHandler.postDelayed(focusResumeCheck, 1500L);
-                }
-                break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                // A real interruption (call, navigation prompt): wait for GAIN.
-                hasFocus = false;
-                if (isPlaying()) {
-                    resumeOnGain = true;
-                    synchronized (lock) {
-                        desiredPlaying = false;
-                    }
-                    sink.pause();
-                    fire(onPaused);
+                if (inCall()) {
+                    pauseForCall();
+                } else {
+                    // The audio mode can flip to a call a beat after the focus
+                    // loss, so give it a moment before concluding this was not an
+                    // interruption. A phantom loss must never pause us: a silent
+                    // two-second recovery is worse than never pausing at all.
+                    callConfirmPending = true;
+                    watchdogHandler.removeCallbacks(callConfirm);
+                    watchdogHandler.postDelayed(callConfirm, CALL_CONFIRM_MS);
                 }
                 break;
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: {
-                float ducked;
-                synchronized (lock) {
-                    ducked = volumePercent / 100f * 0.3f;
-                }
-                sink.setVolume(ducked);
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                // No-op: a notification / navigation prompt must not quiet us.
                 break;
-            }
             case AudioManager.AUDIOFOCUS_GAIN: {
-                watchdogHandler.removeCallbacks(focusResumeCheck);
+                callConfirmPending = false;
+                watchdogHandler.removeCallbacks(callConfirm);
+                watchdogHandler.removeCallbacks(focusCallRetry);
                 hasFocus = true;
                 boolean resume;
-                float volume;
                 synchronized (lock) {
-                    volume = volumePercent / 100f;
-                    resume = resumeOnGain || desiredPlaying;
-                    resumeOnGain = false;
-                    desiredPlaying = true;
+                    resume = resumeOnGain;
                 }
-                sink.setVolume(volume);
-                if (resume && opened) {
-                    sink.play();
-                    holdWifiLock();
-                    acquireWakeLock();
-                    fire(onResumed);
-                }
+                // Only an interruption pause is ours to end; every other loss is
+                // ignored, so an unexpected GAIN must not resume anything.
+                if (resume) resumeFromFocus();
                 break;
             }
             default:
                 break;
         }
+    }
+
+    /** The one confirmed interruption: a call. Pause and wait for it to end. */
+    private void pauseForCall() {
+        callConfirmPending = false;
+        watchdogHandler.removeCallbacks(callConfirm);
+        hasFocus = false;
+        if (isPlaying()) {
+            resumeOnGain = true;
+            synchronized (lock) {
+                desiredPlaying = false;
+            }
+            sink.pause();
+            fire(onPaused);
+        }
+        if (resumeOnGain) {
+            focusRetryAttempts = 0;
+            scheduleFocusCallRetry();
+        }
+    }
+
+    /** Runs a moment after an unrecognised focus loss: only a call that has become
+     *  visible by now is allowed to pause us. */
+    private void confirmCallPause() {
+        if (!callConfirmPending) return;
+        callConfirmPending = false;
+        if (!inCall() || !isPlaying()) return;
+        Logger.info("focus loss turned out to be a call; pausing (direct)");
+        pauseForCall();
+    }
+
+    private static String focusEventName(int change) {
+        switch (change) {
+            case AudioManager.AUDIOFOCUS_LOSS: return "LOSS";
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT: return "LOSS_TRANSIENT";
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: return "LOSS_TRANSIENT_CAN_DUCK";
+            case AudioManager.AUDIOFOCUS_GAIN: return "GAIN";
+            default: return String.valueOf(change);
+        }
+    }
+
+    /** Diagnostic (`adb shell am broadcast -a dev.t1m3.qplayer.DEBUG --es cmd
+     *  focusdump`): the focus state this backend currently holds. */
+    String focusState() {
+        int mode = -1;
+        try {
+            mode = audioManager != null ? audioManager.getMode() : -1;
+        } catch (Throwable ignored) {
+        }
+        return "direct hasFocus=" + hasFocus
+                + " resumeOnGain=" + resumeOnGain
+                + " attempts=" + focusRetryAttempts
+                + " mode=" + mode
+                + " playing=" + isPlaying();
     }
 
     // --- helpers -----------------------------------------------------------

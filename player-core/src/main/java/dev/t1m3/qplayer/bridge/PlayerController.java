@@ -1056,6 +1056,10 @@ public final class PlayerController {
             post(() -> playing.set(true));
             notifyPlayback();
         });
+        // The output route was pulled (headphones unplugged, DAC removed, Bluetooth
+        // disconnected): that is a user-level pause — stop cleanly and stay stopped,
+        // rather than letting the phone's speaker take over the stream.
+        backend.setOnOutputLost(() -> onMain(this::mediaPause));
         // On playback error: retry netease tracks whose cached streamUrl went stale
         // (expired VIP link, region lock, etc.). Non-netease or already-retried
         // tracks fall through to autoAdvance.
@@ -2537,7 +2541,35 @@ public final class PlayerController {
     }
 
     private void applyEffectiveVolume(float gain) {
-        backend.setVolume(userVolume * clampGain(gain));
+        // The slider is a perceptual control, but the gain it turns into is a
+        // plain linear multiplier all the way down. On a digital (software)
+        // attenuator that mismatch squeezes the whole comfortable range into the
+        // bottom fifth of the travel — so map the position through a power curve
+        // before the fade multiplies on top (the fade stays a linear multiplier:
+        // the curve applies to the user's level, not to the fade's own gain).
+        // A hardware level is exempt: that path is already a dB mapping.
+        float level = volumeIsDigital() ? volumeGain(userVolume) : userVolume;
+        backend.setVolume(level * clampGain(gain));
+    }
+
+    /** Exponent of the perceptual volume curve: gain = position ^ gamma. gamma=3
+     *  measures as ~60*log10(position) dB — -60 dB at 10%, -18 dB at the halfway
+     *  mark, 0 dB unchanged at the top — so the felt loudness steps are roughly
+     *  even instead of crowding the first few percent of the slider. */
+    private static final float VOLUME_CURVE_GAMMA = 3f;
+
+    /** Slider position 0..1 → linear gain, on the perceptual curve. */
+    private static float volumeGain(float position) {
+        float x = Math.max(0f, Math.min(1f, position));
+        return (float) Math.pow(x, VOLUME_CURVE_GAMMA);
+    }
+
+    /** True when the slider drives a digital attenuation right now. Desktop (no
+     *  HiFi control) keeps its plain linear slider; an Android exclusive stream
+     *  answers live so a DAC-owned hardware level is never curved twice. */
+    private boolean volumeIsDigital() {
+        HifiOutputControl hifi = hifiControl();
+        return hifi != null && hifi.softwareVolumeActive();
     }
 
     private static float clampGain(float gain) {
@@ -2678,6 +2710,14 @@ public final class PlayerController {
             case "status":
                 Logger.info("debug {}", debugStatus());
                 break;
+            case "focusdump": {
+                // On-demand view of the audio-focus state; the backends also log
+                // every focus event, so a real-device run shows what the ROM sends.
+                HifiOutputControl hifi = hifiControl();
+                String state = hifi != null ? hifi.focusState() : "";
+                Logger.info("focus {}", state.isEmpty() ? "no audio focus on this host" : state);
+                break;
+            }
             case "toggle":
                 toggle();
                 break;
@@ -4850,6 +4890,12 @@ public final class PlayerController {
         // consumed, so that accidental replay restarted the current song at 0.
         needsReplay = false;
         scrobbleOutgoingTrack(pendingNaturalEnd);
+        // A track that reached its own end hands over without a fade or a pause:
+        // the backend's ring still holds its tail, so the next source's decoded
+        // PCM appends straight behind it — that is what makes consecutive
+        // same-format tracks gapless. Only a user-driven switch ramps down and
+        // stops the old one first.
+        final boolean naturalAdvance = pendingNaturalEnd;
         pendingNaturalEnd = false;
         rememberShufflePredecessor(i);
         playIndex = i;
@@ -4866,12 +4912,18 @@ public final class PlayerController {
         // the outgoing track fades. The loaders below re-apply the real lyrics/cover
         // in the same render-queue drain (no flash for instant sources); the
         // backend's onStarted ends the sweep once playback actually begins.
-        // If something is actually audible, ramp it down instead of a hard cut —
-        // FADE_OUT_MS is well under how long a netease URL resolve typically takes,
-        // so this never adds perceptible wait on top of that; backend.pause() only
-        // runs once the ramp reaches silence. Nothing to fade when already silent
-        // (fresh start, already paused) — pause immediately as before.
-        if (fadeEnabled && backend.isPlaying()) {
+        // For an explicit switch, if something is actually audible, ramp it down
+        // instead of a hard cut — FADE_OUT_MS is well under how long a netease URL
+        // resolve typically takes, so this never adds perceptible wait on top of
+        // that; backend.pause() only runs once the ramp reaches silence. Nothing to
+        // fade when already silent (fresh start, already paused) — pause immediately
+        // as before.
+        if (naturalAdvance) {
+            // No fade and no pause: the backend's ring already carries the tail
+            // over, and the incoming source must start at full gain rather than
+            // dipping to silence first.
+            suppressNextFadeIn = true;
+        } else if (fadeEnabled && backend.isPlaying()) {
             startFadeOut(FADE_OUT_MS, () -> backend.pause());
         } else {
             backend.pause();
@@ -5252,6 +5304,11 @@ public final class PlayerController {
         return data;
     }
 
+    /** Canonical ids whose audio is already being pre-resolved, so the same next
+     *  track is not resolved twice while the first attempt is still in flight. */
+    private final Set<String> preResolving =
+            Collections.synchronizedSet(new HashSet<String>());
+
     /** After the current track settles, warm the next + previous tracks' lyrics and
      *  cover bytes on the worker so switching to them is instant (no load-in stutter).
      *  Runs on the main thread; submits per-track work that queues behind the current
@@ -5265,6 +5322,107 @@ public final class PlayerController {
         Track prev = queue.get((cur - 1 + n) % n);
         preloadTrack(next);
         if (prev != next) preloadTrack(prev);
+        preResolveNext();
+    }
+
+    /**
+     * Warm the successor's audio source while the current track plays, so a natural
+     * advance does not pay the stream resolve in the moment between songs. Only the
+     * URL (and a plugin's headers) is fetched here; the switch still does its own
+     * cache check and open, so a stale or failed pre-resolve simply falls back to
+     * resolving then — the existing behaviour, unchanged.
+     *
+     * <p>Only the list-order successor is predictable: a shuffle advance may never
+     * pick the track we warmed, and repeat-one replays what is already open.
+     */
+    private void preResolveNext() {
+        if (queue.size() <= 1 || playMode.peek() != 0) return;
+        int cur = playIndex;
+        if (cur < 0 || cur >= queue.size()) return;
+        Track next = queue.get((cur + 1) % queue.size());
+        if (next == null || currentTrack() == next) return;
+        if (next.source == Track.Source.LOCAL || next.source == Track.Source.CUSTOM_API) return;
+        String key = next.canonicalId();
+        if (key == null || key.isEmpty() || !preResolving.add(key)) return;
+        if (next.source == Track.Source.NETEASE) {
+            if (next.neteaseId == 0 || next.streamUrl != null
+                    || diskCache.getAudio(next.neteaseId) != null) {
+                preResolving.remove(key);
+                return;
+            }
+            preResolveNetease(next, key);
+        } else if (next.source == Track.Source.PLUGIN) {
+            if (hasFreshPluginStream(next) || diskCache.getAudio(key) != null) {
+                preResolving.remove(key);
+                return;
+            }
+            preResolvePlugin(next, key);
+        } else {
+            preResolving.remove(key);
+        }
+    }
+
+    private void preResolveNetease(final Track t, final String key) {
+        worker.submit(() -> {
+            String resolved = null;
+            try {
+                if (t.title == null || t.title.isEmpty()
+                        || t.coverUrl == null || t.coverUrl.isEmpty()) {
+                    NeteaseSong sd = netease.songDetail(t.neteaseId);
+                    if (sd != null) {
+                        if (t.title == null || t.title.isEmpty()) t.title = sd.name;
+                        if (t.artist == null || t.artist.isEmpty()) t.artist = sd.artist;
+                        if (t.album == null || t.album.isEmpty()) t.album = sd.album;
+                        if (t.coverUrl == null || t.coverUrl.isEmpty()) t.coverUrl = sd.coverUrl;
+                        if (t.durationMs <= 0) t.durationMs = sd.durationMs;
+                    }
+                }
+                NeteaseClient.UrlInfo info = netease.songUrlInfo(t.neteaseId, playLevel);
+                // A trial-only answer is left for play time to decide: resolving it
+                // here would publish a preview clip as if it were the real thing.
+                if (info != null && !info.trial) resolved = info.url;
+            } catch (Throwable e) {
+                Logger.warn("netease: pre-resolve failed for {}: {}", t.neteaseId, e.getMessage());
+            }
+            final String url = resolved;
+            onMain(() -> {
+                preResolving.remove(key);
+                if (url == null || url.isEmpty() || isCurrentTrack(t)) return;
+                if (t.streamUrl != null && !t.streamUrl.isEmpty()) return;
+                t.streamUrl = url;
+                t.trial = false;
+                Logger.info("netease: pre-resolved next track: {}", t.title);
+            });
+        });
+    }
+
+    private void preResolvePlugin(final Track track, final String key) {
+        final MediaId id;
+        try {
+            id = MediaId.parse(key);
+        } catch (IllegalArgumentException error) {
+            preResolving.remove(key);
+            return;
+        }
+        if (!pluginHasCapability(id.provider(), ProviderCapability.RESOLVE_STREAM)) {
+            preResolving.remove(key);
+            return;
+        }
+        pluginProviders.resolveStream(id, playLevel).whenComplete((stream, error) -> onMain(() -> {
+            preResolving.remove(key);
+            if (error != null || stream == null || stream.url == null || stream.url.isEmpty()) return;
+            if (isCurrentTrack(track)) return;
+            // Published to the shared Track so the switch picks it up; the switch
+            // re-checks freshness, so an expired result falls back to a fresh resolve.
+            track.streamUrl = stream.url;
+            track.streamHeaders.clear();
+            track.streamHeaders.putAll(stream.headers);
+            track.streamExpiresAtMs = stream.expiresAtMs;
+            track.renditionId = stream.renditionId;
+            track.trial = stream.trial;
+            track.streamCacheable = stream.cacheable;
+            Logger.info("plugin {}: pre-resolved next track: {}", id.provider(), track.title);
+        }));
     }
 
     private void preloadTrack(Track t) {
@@ -5667,6 +5825,10 @@ public final class PlayerController {
         hifiEnabled.set(on);
         HifiOutputControl hifi = hifiControl();
         if (hifi != null) hifi.setHifiEnabled(on);
+        // Turning the direct path on/off can move the slider between a digital
+        // gain and the DAC's own control: re-send the level under the curve that
+        // is now in effect instead of leaving the first press to jump loudness.
+        applyEffectiveVolume(currentFadeGain());
         refreshHifiStatus();
     }
 
@@ -5682,6 +5844,10 @@ public final class PlayerController {
     public void setHifiVolumeMode(int mode) {
         HifiOutputControl hifi = hifiControl();
         if (hifi != null) hifi.setVolumeMode(mode == 1 ? 1 : 0);
+        // The two modes put the slider on different ends of the chain (digital
+        // gain vs the DAC's own control), so re-send the level under whichever
+        // curve now applies — otherwise the first press after the switch jumps.
+        applyEffectiveVolume(currentFadeGain());
         refreshHifiStatus();
     }
 
@@ -5690,6 +5856,15 @@ public final class PlayerController {
         HifiOutputControl hifi = hifiControl();
         if (hifi != null) hifi.selectOutputDevice(deviceId != null ? deviceId : "");
         refreshHifiStatus();
+    }
+
+    /** Settings toggle: hold a silent framework AudioTrack while the exclusive
+     *  stream plays. See {@link HifiOutputControl#setKeepAliveTrack} — an
+     *  experiment for ROMs that suspend the framework-bypassing path once the app
+     *  is in the background. */
+    public void setHifiKeepAliveTrack(boolean on) {
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.setKeepAliveTrack(on);
     }
 
     /** Chain-card refresh button: re-enumerate the output-device list. */

@@ -69,6 +69,15 @@ public interface AudioBackend {
     default void setOnResumed(Runnable callback) { }
 
     /**
+     * Callback for "the output route was pulled while playing" — headphones
+     * unplugged, the USB DAC removed, a Bluetooth sink disconnected. The
+     * controller must treat it as a user-level pause (no retry, no auto-advance),
+     * so nothing plays out of the phone's speaker after the route is gone.
+     * Default no-op.
+     */
+    default void setOnOutputLost(Runnable callback) { }
+
+    /**
      * Callback invoked when the backend encounters a playback error (e.g.
      * MediaPlayer error, invalid source). May fire on the audio thread.
      * Default no-op.

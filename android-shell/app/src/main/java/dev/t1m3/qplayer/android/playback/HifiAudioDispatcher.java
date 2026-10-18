@@ -57,6 +57,8 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     private boolean hifiEnabled;
     private boolean followSampleRate = true;
     private int volumeMode = 0;
+    /** Experimental keep-alive track; see {@link HifiOutputControl#setKeepAliveTrack}. */
+    private volatile boolean keepAliveTrack;
     private int reportedOpenGen = -1;
     private float pendingDeviceVolume = -1f;
     private String selectedDeviceId = "";
@@ -85,6 +87,7 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     private Runnable onPaused;
     private Runnable onResumed;
     private Runnable onError;
+    private Runnable onOutputLost;
 
     public HifiAudioDispatcher(Context context) {
         appContext = context.getApplicationContext();
@@ -139,9 +142,10 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
 
     /**
      * A USB DAC appearing or disappearing changes both what is possible and where
-     * the sound is going: capabilities are re-probed, and a direct mode whose
-     * device just went away stops claiming it is still using it — playback moves
-     * to the system path instead of going silent.
+     * the sound is going: capabilities are re-probed. A direct mode whose device
+     * just went away is paused by the removal callback, not replayed on the phone
+     * speaker — so this only re-probes and moves the NEXT user-initiated play onto
+     * whatever route is left.
      */
     private void registerRouteWatcher() {
         if (audioManager == null) return;
@@ -154,30 +158,117 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
 
             @Override
             public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
-                onRouteChanged();
+                onOutputRemoved(removedDevices);
             }
         };
         audioManager.registerAudioDeviceCallback(routeCallback, routeHandler);
     }
 
+    /** An output route was pulled. If it was the one the framework was routing to,
+     *  confirm the loss before pausing: a ROM that re-evaluates its device set (an
+     *  audio-policy pass on screen-off, for instance) reports removed+added in the
+     *  same instant, and pausing on that would strand playback silent until the
+     *  user pressed play again. Only a route that is still gone is a real removal. */
+    private void onOutputRemoved(AudioDeviceInfo[] removedDevices) {
+        int lost = removedActiveOutputRank(removedDevices);
+        if (lost < Integer.MAX_VALUE) {
+            Logger.info("output route removed while playing: {}; confirming",
+                    describe(removedDevices));
+            pendingLostRank = lost;
+            routeHandler.removeCallbacks(routeLossConfirm);
+            routeHandler.postDelayed(routeLossConfirm, ROUTE_LOSS_CONFIRM_MS);
+        }
+        onRouteChanged();
+    }
+
+    /** The rank of the output that was in use and has just been removed, or
+     *  {@link Integer#MAX_VALUE} when the removed devices were not the route. The
+     *  mixer picks USB over Bluetooth over the wired jack over the built-ins, so a
+     *  removed device that outranks whatever is still connected must have been the
+     *  routed one. */
+    private int removedActiveOutputRank(AudioDeviceInfo[] removed) {
+        if (removed == null || removed.length == 0) return Integer.MAX_VALUE;
+        int nowRank = outputRank(AndroidHifiProbe.activeOutput(audioManager));
+        int lost = Integer.MAX_VALUE;
+        for (AudioDeviceInfo device : removed) {
+            if (device == null || !device.isSink()) continue;
+            int rank = outputRank(device);
+            if (rank < nowRank && rank < lost) lost = rank;
+        }
+        return lost;
+    }
+
+    /** Runs a moment after a removal: pause only if the route really stayed away.
+     *  An output at least as good as the lost one being connected again means this
+     *  was a re-enumeration (or a re-plug) and playback continues untouched. */
+    private void confirmRouteLoss() {
+        int lost = pendingLostRank;
+        pendingLostRank = Integer.MAX_VALUE;
+        if (lost == Integer.MAX_VALUE) return;
+        for (AudioDeviceInfo device : AndroidHifiProbe.outputs(audioManager)) {
+            if (outputRank(device) <= lost) return;
+        }
+        // The route really is gone: point the next play at whatever is left, and
+        // pause the current one rather than let the speaker take the stream over.
+        Logger.info("output route (rank {}) is really gone", lost);
+        synchronized (lock) {
+            if (active == direct && direct != null) {
+                markFallback(I18n.tr("settings.hifiChain.reason.deviceGone"));
+            }
+        }
+        if (!isPlaying()) return;
+        try {
+            active.pause();
+        } catch (Throwable ignored) {
+        }
+        fire(onOutputLost);
+    }
+
+    /** Finer than the picker's {@link AndroidHifiProbe#routeRank}: the wired jack
+     *  outranks the built-in speaker, so an unplugged headphone is distinguishable
+     *  from the speaker the framework fell back to. */
+    private static int outputRank(AudioDeviceInfo device) {
+        if (device == null) return Integer.MAX_VALUE;
+        switch (device.getType()) {
+            case AudioDeviceInfo.TYPE_USB_DEVICE:
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_USB_ACCESSORY:
+                return 0;
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_BLE_HEADSET:
+            case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+                return 1;
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+                return 2;
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER:
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE:
+                return 3;
+            default:
+                return 4;
+        }
+    }
+
+    private static String describe(AudioDeviceInfo[] devices) {
+        if (devices == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (AudioDeviceInfo device : devices) {
+            if (device == null || !device.isSink()) continue;
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(device.getType()).append(':').append(AndroidHifiProbe.productName(device));
+        }
+        return sb.toString();
+    }
+
+    /** Re-probe what the routes can do after a change. A route that merely appeared
+     *  never touches what is playing; a route that disappeared is decided by
+     *  {@link #confirmRouteLoss}, which is why this stays side-effect free. */
     private void onRouteChanged() {
-        boolean usbPresent = !AndroidHifiProbe.usbOutputs(audioManager).isEmpty();
         synchronized (lock) {
             // A different set of routes is a different set of capabilities: a mode
             // that failed on the old device deserves a fresh attempt.
             exclusiveUnavailable = false;
-            if (!usbPresent && active == direct && direct != null) {
-                markFallback(I18n.tr("settings.hifiChain.reason.deviceGone"));
-                pendingRouteFallback = true;
-            }
-        }
-        if (pendingRouteFallback) {
-            AndroidDirectAudioBackend directBackend = direct;
-            long position = directBackend != null ? directBackend.position() : lastStartMs;
-            Logger.warn("output route disappeared; continuing on the system path");
-            pendingRouteFallback = false;
-            switchTo(system);
-            if (!lastSource.isEmpty()) playOn(system, lastSource, lastHeaders, position);
         }
         Runnable listener = deviceChangeListener;
         if (listener != null) listener.run();
@@ -185,7 +276,11 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
 
     private Handler routeHandler;
     private AudioDeviceCallback routeCallback;
-    private volatile boolean pendingRouteFallback;
+    /** How long a removal is given to prove itself a re-plug before it counts. */
+    private static final long ROUTE_LOSS_CONFIRM_MS = 450L;
+    /** Rank of the output a pending removal is waiting on; MAX_VALUE = none. */
+    private int pendingLostRank = Integer.MAX_VALUE;
+    private final Runnable routeLossConfirm = this::confirmRouteLoss;
     private volatile Runnable deviceChangeListener;
 
     /** Host hook: told whenever the output routes change, so the chain readout can
@@ -199,6 +294,8 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     public void stopWatchingRoutes() {
         AudioDeviceCallback callback = routeCallback;
         routeCallback = null;
+        pendingLostRank = Integer.MAX_VALUE;
+        if (routeHandler != null) routeHandler.removeCallbacks(routeLossConfirm);
         if (audioManager != null && callback != null) {
             try {
                 audioManager.unregisterAudioDeviceCallback(callback);
@@ -250,6 +347,16 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     private void handleDirectFailure() {
         AndroidDirectAudioBackend failed = direct;
         String reason = failed != null ? failed.lastError() : "";
+        if (failed != null && failed.kind() == AndroidDirectAudioBackend.KIND_USB_EXCLUSIVE
+                && AndroidUsbAudio.findAudioDevice(appContext) == null) {
+            // The DAC is really gone: its writes now go nowhere, so pause instead
+            // of replaying the track out of the phone's speaker. (The device
+            // callback waits a moment to be sure; this is the authoritative check
+            // for the one case where a gone route is knowable right now.)
+            Logger.warn("usb dac disappeared ({}); pausing instead of falling back", reason);
+            fire(onOutputLost);
+            return;
+        }
         if (directStarted) {
             long position = failed != null ? failed.position() : lastStartMs;
             Logger.warn("direct mode failed mid-track ({}); continuing on the system path", reason);
@@ -364,6 +471,7 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
             direct.setSelectedDeviceId(selectedDeviceId);
             direct.setFollowSampleRate(followSampleRate);
             direct.setVolumeMode(volumeMode);
+            direct.setKeepAliveTrack(keepAliveTrack);
             current = direct;
         }
         if (previous != null) {
@@ -449,6 +557,11 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     @Override
     public void setOnResumed(Runnable callback) {
         onResumed = callback;
+    }
+
+    @Override
+    public void setOnOutputLost(Runnable callback) {
+        onOutputLost = callback;
     }
 
     @Override
@@ -602,6 +715,36 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
         AndroidDirectAudioBackend directBackend = direct;
         return directBackend != null && active == directBackend
                 ? directBackend.volumeKind() : "";
+    }
+
+    /** Live: true unless the direct stream is up and the slider is really writing
+     *  the DAC's own control. The system path (MediaPlayer) and a fallback both
+     *  attenuate digitally, so those get the perceptual volume curve; a hardware
+     *  level does not. */
+    @Override
+    public boolean softwareVolumeActive() {
+        if (!hifiEnabled) return true;
+        AndroidDirectAudioBackend directBackend = direct;
+        if (directBackend == null || active != directBackend) return true;
+        return !directBackend.hardwareVolumeActive();
+    }
+
+    /** The focus state of whichever backend is actually playing, for the
+     *  {@code focusdump} debug command. */
+    @Override
+    public String focusState() {
+        AndroidDirectAudioBackend directBackend = direct;
+        if (hifiEnabled && directBackend != null && active == directBackend) {
+            return directBackend.focusState();
+        }
+        return system.focusState();
+    }
+
+    @Override
+    public void setKeepAliveTrack(boolean on) {
+        keepAliveTrack = on;
+        AndroidDirectAudioBackend directBackend = direct;
+        if (directBackend != null) directBackend.setKeepAliveTrack(on);
     }
 
     @Override

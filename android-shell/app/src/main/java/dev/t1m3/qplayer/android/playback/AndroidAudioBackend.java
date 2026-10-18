@@ -59,14 +59,14 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private Runnable onResumed;
     private Runnable onError;
 
-    // Audio focus: pause on loss (call / other player), duck on transient-can-duck,
-    // resume on regain when the loss was transient.
+    // Audio focus: a full loss (another player, screen-off) and a transient duck
+    // are both ignored; only a real interruption (a call) pauses us. See
+    // onFocusChange.
     private final AudioManager audioManager;
     private final Context appContext;
     private AudioFocusRequest focusRequest;
     private boolean hasFocus;
     private boolean resumeOnGain;
-    private boolean ducked;
     private boolean buffering;
     private String cachePendingPath;
     private String cacheCompletePath;
@@ -195,6 +195,13 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     @Override
     public synchronized void pause() {
         wantPlay = false;
+        // A user pause cancels a pending call-resume: a call that ends later must
+        // not start the music again by itself.
+        resumeOnGain = false;
+        focusRetryAttempts = 0;
+        callConfirmPending = false;
+        stallHandler.removeCallbacks(focusCallRetry);
+        stallHandler.removeCallbacks(callConfirm);
         stallHandler.removeCallbacks(stallCheck);
         releaseWifiLock();
         if (player != null && prepared && player.isPlaying()) {
@@ -268,8 +275,7 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
 
     private void applyVolume() {
         if (player != null && prepared) {
-            float effective = ducked ? volume * 0.3f : volume;
-            player.setVolume(effective, effective);
+            player.setVolume(volume, volume);
         }
     }
 
@@ -480,58 +486,159 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     }
 
     private void abandonFocus() {
+        stallHandler.removeCallbacks(focusCallRetry);
+        callConfirmPending = false;
+        stallHandler.removeCallbacks(callConfirm);
         if (audioManager != null && focusRequest != null) {
             audioManager.abandonAudioFocusRequest(focusRequest);
         }
         focusRequest = null;
         hasFocus = false;
-        ducked = false;
         resumeOnGain = false;
     }
 
+    /** After a TRANSIENT loss (a call) we wait for GAIN; OEM builds do not always
+     *  send it, so poll — while we still intend to play and the phone is not in a
+     *  call, resume. Capped only as hygiene: a long call is guarded by the in-call
+     *  check, and a user pause cancels the poll outright. */
+    private static final long FOCUS_RETRY_INTERVAL_MS = 2000L;
+    private static final int FOCUS_RETRY_LIMIT = 300;
+    /** How long a focus loss is given to prove itself a call before being ignored. */
+    private static final long CALL_CONFIRM_MS = 600L;
+    private int focusRetryAttempts;
+    private boolean callConfirmPending;
+    private final Runnable focusCallRetry = this::retryTransientLoss;
+    private final Runnable callConfirm = this::confirmCallPause;
+
+    private synchronized void scheduleFocusCallRetry() {
+        stallHandler.removeCallbacks(focusCallRetry);
+        stallHandler.postDelayed(focusCallRetry, FOCUS_RETRY_INTERVAL_MS);
+    }
+
+    private synchronized void retryTransientLoss() {
+        if (!resumeOnGain || audioManager == null) return;
+        if (focusRetryAttempts >= FOCUS_RETRY_LIMIT) return;
+        focusRetryAttempts++;
+        if (inCall()) {
+            scheduleFocusCallRetry();
+            return;
+        }
+        // Take the focus back if the ROM offers it, but resume either way: waiting
+        // for a grant is what left playback stranded when the ROM refuses one.
+        requestFocus();
+        resumeFromFocus();
+    }
+
+    private boolean inCall() {
+        try {
+            int mode = audioManager.getMode();
+            return mode == AudioManager.MODE_IN_CALL
+                    || mode == AudioManager.MODE_IN_COMMUNICATION;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    private void resumeFromFocus() {
+        resumeOnGain = false;
+        wantPlay = true;
+        if (player != null && prepared) {
+            try {
+                if (!player.isPlaying()) player.start();
+            } catch (IllegalStateException ignored) {
+            }
+            holdWifiLock(source);
+            scheduleStallCheck();
+            fire(onResumed);
+        }
+    }
+
+    /** Focus policy: a real interruption is the only thing that may pause us. A
+     *  full LOSS (another player starting, the screen going off) and a transient
+     *  duck are otherwise no-ops — nothing another app plays may stop or quiet our
+     *  music. "Interruption" is decided by the phone actually being in a call, not
+     *  by which event name the ROM chose. */
     private synchronized void onFocusChange(int change) {
+        Logger.info("focus event {} (system)", focusEventName(change));
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                // OEM ROMs (MIUI/ColorOS) send LOSS when the screen turns off and
-                // often never send GAIN on unlock. Treat both as transient: keep
-                // wantPlay so Activity.onResume / the stall watchdog can restart.
-                hasFocus = false;
-                if (player != null && prepared && player.isPlaying()) {
-                    player.pause();
-                    resumeOnGain = true;
-                    fire(onPaused);
+                if (inCall()) {
+                    pauseForCall();
+                } else {
+                    // The audio mode can flip to a call a beat after the focus
+                    // loss; a phantom loss must never pause us.
+                    callConfirmPending = true;
+                    stallHandler.removeCallbacks(callConfirm);
+                    stallHandler.postDelayed(callConfirm, CALL_CONFIRM_MS);
                 }
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                if (player != null && prepared && player.isPlaying()) {
-                    ducked = true;
-                    applyVolume();
-                }
+                // No-op: notification / navigation prompts must not quiet us.
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
+                callConfirmPending = false;
+                stallHandler.removeCallbacks(callConfirm);
+                stallHandler.removeCallbacks(focusCallRetry);
                 hasFocus = true;
-                if (ducked) {
-                    ducked = false;
-                    applyVolume();
-                }
-                if (resumeOnGain || wantPlay) {
-                    resumeOnGain = false;
-                    wantPlay = true;
-                    if (player != null && prepared) {
-                        try {
-                            if (!player.isPlaying()) player.start();
-                        } catch (IllegalStateException ignored) {
-                        }
-                        holdWifiLock(source);
-                        scheduleStallCheck();
-                        fire(onResumed);
-                    }
-                }
+                // Only an interruption pause is ours to end.
+                if (resumeOnGain) resumeFromFocus();
                 break;
             default:
                 break;
         }
+    }
+
+    /** The one confirmed interruption: a call. Pause and wait for it to end. */
+    private void pauseForCall() {
+        callConfirmPending = false;
+        stallHandler.removeCallbacks(callConfirm);
+        hasFocus = false;
+        if (player != null && prepared && player.isPlaying()) {
+            player.pause();
+            resumeOnGain = true;
+            fire(onPaused);
+        }
+        if (resumeOnGain) {
+            focusRetryAttempts = 0;
+            scheduleFocusCallRetry();
+        }
+    }
+
+    /** Runs a moment after an unrecognised focus loss: only a call that has become
+     *  visible by now is allowed to pause us. */
+    private synchronized void confirmCallPause() {
+        if (!callConfirmPending) return;
+        callConfirmPending = false;
+        if (!inCall() || !(player != null && prepared && player.isPlaying())) return;
+        Logger.info("focus loss turned out to be a call; pausing (system)");
+        pauseForCall();
+    }
+
+    private static String focusEventName(int change) {
+        switch (change) {
+            case AudioManager.AUDIOFOCUS_LOSS: return "LOSS";
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT: return "LOSS_TRANSIENT";
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: return "LOSS_TRANSIENT_CAN_DUCK";
+            case AudioManager.AUDIOFOCUS_GAIN: return "GAIN";
+            default: return String.valueOf(change);
+        }
+    }
+
+    /** Diagnostic (`adb shell am broadcast -a dev.t1m3.qplayer.DEBUG --es cmd
+     *  focusdump`): the focus state this backend currently holds. */
+    @Override
+    public synchronized String focusState() {
+        int mode = -1;
+        try {
+            mode = audioManager != null ? audioManager.getMode() : -1;
+        } catch (Throwable ignored) {
+        }
+        return "system hasFocus=" + hasFocus
+                + " resumeOnGain=" + resumeOnGain
+                + " attempts=" + focusRetryAttempts
+                + " mode=" + mode
+                + " playing=" + isPlaying();
     }
 
     private void holdWifiLock(String src) {

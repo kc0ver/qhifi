@@ -25,10 +25,11 @@ public class HifiSettingsTest {
     @Test
     public void everyHifiRowIsAndroidOnly() {
         Set<String> android = keysOn(SettingsCatalog.HIFI, SettingsCatalog.ANDROID);
-        assertEquals(4, android.size());
+        assertEquals(5, android.size());
         assertTrue(android.contains(SettingsCatalog.HIFI_ENABLED_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_KEEPALIVE_KEY));
         assertTrue(android.contains("action:pickHifiDevice"));
 
         // Nothing for the HiFi category at all on desktop: categories() drops a

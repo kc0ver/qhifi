@@ -34,8 +34,34 @@ public interface HifiOutputControl {
      *  the status. */
     void setHifiEnabled(boolean on);
 
+    /** Experimental: hold a silent framework AudioTrack for as long as the
+     *  exclusive stream plays. The exclusive path bypasses the framework entirely
+     *  (no AudioTrack exists under this app's uid), and ROMs that judge an app by
+     *  the platform's own audio bookkeeping may suspend such a process in the
+     *  background — the session still says "playing" while the output goes quiet.
+     *  A no-op on hosts with no exclusive path. */
+    default void setKeepAliveTrack(boolean on) {
+    }
+
     /** Output at the source's own rate instead of the framework's mix rate. */
     void setFollowSampleRate(boolean on);
+
+    /** Live answer to "does the app's volume slider drive a digital gain right
+     *  now?". Only a digital attenuation gets the perceptual volume curve: a
+     *  hardware level is already a dB mapping of its own, so curving it again
+     *  would double the steepness. Hosts whose slider is always digital return
+     *  true; the exclusive dispatcher reports the mode actually in effect on the
+     *  open stream. Default true so older hosts and test doubles keep compiling. */
+    default boolean softwareVolumeActive() {
+        return true;
+    }
+
+    /** Diagnostic for the {@code focusdump} debug command: the audio-focus state
+     *  the active backend currently holds (focus, pending call resume, call mode).
+     *  Empty on hosts with no audio focus. */
+    default String focusState() {
+        return "";
+    }
 
     /** Which end the app's volume slider drives on an exclusive stream:
      *  0 = hardware (the DAC's own control, samples locked at full scale),

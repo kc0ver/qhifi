@@ -165,6 +165,14 @@ public final class SettingsCatalog {
      *  row of its own: the list is dynamic, so the row is an action that opens
      *  the host's picker instead of a dropdown over static options. */
     public static final String HIFI_DEVICE_KEY = "hifiOutputDevice";
+    /** Experimental: hold a silent framework AudioTrack while the exclusive
+     *  stream plays. That path bypasses AudioFlinger completely, so the platform
+     *  sees no audio stream under this app's uid; some ROMs then suspend the
+     *  process once it is in the background (the session still reports "playing"
+     *  but the output goes quiet). A silent track keeps the app inside the
+     *  platform's own audio bookkeeping, which is where a framework-playing app
+     *  always sits. */
+    public static final String HIFI_KEEPALIVE_KEY = "hifiKeepAliveAudioTrack";
 
     private SettingsCatalog() {}
 
@@ -575,6 +583,14 @@ public final class SettingsCatalog {
                         VOLUME_MODE_HARDWARE,
                         "settings.hifiVolumeMode.hardware", "settings.hifiVolumeMode.software")
                 .desc("settings.hifiVolumeMode.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiOutput")
+                .build());
+        // Experimental workaround: see HIFI_KEEPALIVE_KEY. Off by default so a
+        // normal install behaves exactly as before; the point is an A/B.
+        out.add(SettingSpec.toggle(HIFI_KEEPALIVE_KEY, HIFI, "settings.hifiKeepAlive.title", false)
+                .desc("settings.hifiKeepAlive.desc")
                 .onlyOn(ANDROID)
                 .dependsOn(HIFI_ENABLED_KEY)
                 .group("hifiOutput")

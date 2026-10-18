@@ -522,6 +522,9 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case SettingsCatalog.HIFI_DEVICE_KEY:
                     controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
                     break;
+                case SettingsCatalog.HIFI_KEEPALIVE_KEY:
+                    controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
+                    break;
                 default: break;
             }
         }
@@ -546,6 +549,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
         controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
         controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
+        controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
     }
 
     private void applyLanguage() {

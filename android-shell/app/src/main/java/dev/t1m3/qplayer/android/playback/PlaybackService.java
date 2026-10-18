@@ -8,10 +8,13 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -67,6 +70,10 @@ public final class PlaybackService extends Service {
     private final PlayerController.PlaybackListener selfListener = this::onControllerChanged;
     private ScheduledExecutorService checkpointWorker;
     private LyriconBridge lyricon;
+    /** Wired headphones pulled. The device callback already pauses via the
+     *  backend, but this system broadcast is a cheap second net for the wired
+     *  case (and costs nothing to keep). */
+    private BroadcastReceiver noisyReceiver;
 
     @Override
     public void onCreate() {
@@ -126,6 +133,7 @@ public final class PlaybackService extends Service {
         lyricon = new LyriconBridge();
         lyricon.start(this);
         OverlayLyricWindow.attach(this);
+        registerNoisyReceiver();
         checkpointWorker.scheduleWithFixedDelay(() -> {
             LyriconBridge bridge = lyricon;
             if (bridge != null) bridge.pushPosition();
@@ -145,6 +153,46 @@ public final class PlaybackService extends Service {
             refresh();
         } catch (Throwable e) {
             Logger.error("PlaybackService: refresh failed: {}", e.toString());
+        }
+    }
+
+    /** Second net for "wired headphones unplugged": the system's own
+     *  ACTION_AUDIO_BECOMING_NOISY, alongside the backend's device callback.
+     *  Bluetooth disconnect does not send this broadcast, which is why the device
+     *  callback is the primary path. */
+    private void registerNoisyReceiver() {
+        if (noisyReceiver != null) return;
+        noisyReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (intent == null
+                        || !AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                    return;
+                }
+                PlayerController c = controller;
+                if (c != null && c.isPlaying()) {
+                    Logger.info("audio becoming noisy (jack pulled); pausing");
+                    c.mediaPause();
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        if (Build.VERSION.SDK_INT >= 33) {
+            // The system always delivers to NOT_EXPORTED receivers; the flag only
+            // stops other apps from spoofing this action at us.
+            registerReceiver(noisyReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(noisyReceiver, filter);
+        }
+    }
+
+    private void unregisterNoisyReceiver() {
+        BroadcastReceiver receiver = noisyReceiver;
+        noisyReceiver = null;
+        if (receiver != null) {
+            try {
+                unregisterReceiver(receiver);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -178,6 +226,7 @@ public final class PlaybackService extends Service {
         // Stop playback and release audio backend — called when the task is
         // swiped away (stopWithTask="true") or explicitly stopped.
         if (instance == this) instance = null;
+        unregisterNoisyReceiver();
         if (checkpointWorker != null) {
             checkpointWorker.shutdownNow();
             checkpointWorker = null;
