@@ -272,6 +272,20 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         if (controller != null) controller.setVolume(clamped / 100f);
     }
 
+    /** Follow the level the backend is actually playing at, without driving it:
+     *  the DAC's own control adopted at open, the Android volume keys and the HiFi
+     *  HUD all move {@code controller} directly, and a store value left behind by
+     *  those would be written back over them on the next settings push. So the
+     *  stored app volume is a mirror of that live level, not a second truth.
+     *  Deliberately no {@code controller.setVolume} here — that level is already
+     *  in flight, and pushing it back would repeat a DAC hardware write. */
+    public void noteVolumeFromHost(float level) {
+        int percent = Math.round(Math.max(0f, Math.min(1f, level)) * 100f);
+        if (percent == appVolume.peek()) return;
+        appVolume.set(percent);
+        if (store != null) store.putInt(APP_VOLUME_KEY, percent);
+    }
+
     /** Stepper -/+ , clamped. Keeps the arithmetic out of every generated row. */
     public void bump(String key, int direction) {
         SettingSpec spec = specsByKey.get(key);

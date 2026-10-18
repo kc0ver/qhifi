@@ -130,6 +130,42 @@ public class PlayerControllerHifiTest {
         }
     }
 
+    /** The perceptual curve is ours, so it belongs to the level we own: only the
+     *  exclusive digital attenuation gets it. Everywhere else — the framework
+     *  route, a fallback, desktop — the host's own plain linear app volume stands
+     *  and a slider reads as the fraction it says. */
+    @Test
+    public void perceptualCurveAppliesOnlyToTheExclusiveDigitalLevel() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("hifi-curve").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            VolumeProbeBackend backend = new VolumeProbeBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+
+            backend.digital = false;
+            controller.setVolume(0.8f);
+            assertEquals(0.8f, backend.level, 1e-6);
+
+            backend.digital = true;
+            controller.setVolume(0.8f);
+            assertEquals((float) Math.pow(0.8, 3), backend.level, 1e-6);
+
+            // Back to a level the host does not report as digital (a hardware end
+            // or the framework route): linear again on the very next write.
+            backend.digital = false;
+            controller.setVolume(0.5f);
+            assertEquals(0.5f, backend.level, 1e-6);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
     /** The refresh runs off the render thread, so a test has to drain the UI
      *  queue itself — the app's own render loop is what normally does it. */
     private static void awaitHifi(PlayerController controller, Condition done)
@@ -159,6 +195,38 @@ public class PlayerControllerHifiTest {
         @Override public void setVolume(float volume) { }
         @Override public void setOnComplete(Runnable callback) { }
         @Override public void release() { playing = false; }
+    }
+
+    /** A backend whose slider is only sometimes digital — the exclusive stream
+     *  answers live, so the test can flip the answer and watch what reaches the
+     *  sink. */
+    private static final class VolumeProbeBackend extends FakeAudioBackend
+            implements HifiOutputControl {
+        boolean digital;
+        float level = -1f;
+
+        @Override public void setVolume(float volume) { level = volume; }
+
+        @Override public boolean softwareVolumeActive() { return digital; }
+
+        @Override public List<AudioOutputDevice> outputDevices() {
+            return Arrays.asList(new AudioOutputDevice("", "自动（系统默认）",
+                    AudioOutputDevice.ROUTE_USB, true));
+        }
+
+        @Override public AudioOutputStatus outputStatus() {
+            return new AudioOutputStatus("", "", AudioOutputDevice.ROUTE_USB, "PCM", 48000, 16,
+                    "PCM", 48000, 16, false, false, false, "", HifiOutputMode.SYSTEM,
+                    HifiOutputMode.SYSTEM, AudioOutputStatus.EXCLUSIVE_NONE, "");
+        }
+
+        @Override public HifiCapabilities capabilities() {
+            return new HifiCapabilities(false, false, false, 0, "");
+        }
+
+        @Override public void setHifiEnabled(boolean on) { }
+        @Override public void setFollowSampleRate(boolean on) { }
+        @Override public void selectOutputDevice(String deviceId) { }
     }
 
     /** A backend with the optional capability, reporting a 24/96 source that the

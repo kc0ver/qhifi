@@ -2564,9 +2564,11 @@ public final class PlayerController {
         return (float) Math.pow(x, VOLUME_CURVE_GAMMA);
     }
 
-    /** True when the slider drives a digital attenuation right now. Desktop (no
-     *  HiFi control) keeps its plain linear slider; an Android exclusive stream
-     *  answers live so a DAC-owned hardware level is never curved twice. */
+    /** True when the slider drives a digital attenuation right now. Only the
+     *  exclusive stream gets the perceptual curve: the framework path keeps the
+     *  host's own plain linear app volume, and desktop (no HiFi control) does too.
+     *  A DAC-owned hardware level is exempt as well — it is already a dB mapping,
+     *  so curving it again would double the steepness. */
     private boolean volumeIsDigital() {
         HifiOutputControl hifi = hifiControl();
         return hifi != null && hifi.softwareVolumeActive();

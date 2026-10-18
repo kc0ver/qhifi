@@ -902,72 +902,17 @@ Rectangle {
         z: 30000
     }
 
-    // Volume HUD, HiBy-style: any volume change (keys, slider) pops a card at
-    // the top that names what the level drives — the DAC's own control in
-    // hardware mode, the app's digital gain otherwise — and carries a slider
-    // that stays live while the card is up. It fades out once the level sits
-    // still for a moment. Volume keys are taken over by the exclusive driver
-    // (the framework's own key handling targets a stream nothing plays through
-    // then), so this card is their visible feedback, replacing the raw toast.
-    property real volumeWatch: player.volume
-    onVolumeWatchChanged: volumeHud.poke()
-
-    Rectangle {
-        id: volumeHud
-        z: 25000
-        visible: opacity > 0.01
-        opacity: shown ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 160 } }
-        property bool shown: false
-        function poke() {
-            shown = true
-            if (!hudSlider.pressed) hudSlider.value = player.volume
-            hudHide.restart()
-        }
-        width: Math.min(420, parent.width - 32)
-        height: 88
-        radius: 18
-        color: Theme.color.surfaceContainerHigh
+    // Volume HUD, HiBy-style: any volume change (keys, slider) pops a card that
+    // names what the level drives; exclusive-only, so the framework route keeps
+    // upstream's own chrome as its control and feedback. It lives in
+    // components/VolumeHud.qml on purpose: qml4j compiles a whole document into
+    // one constructor method and ASM caps a method at 64 KB, which this file is
+    // already close to — anything sizeable added here must go into a component
+    // of its own.
+    VolumeHud {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.topMargin: settings.topInset + 10
-
-        Text {
-            id: hudTitle
-            anchors.top: parent.top
-            anchors.topMargin: 12
-            anchors.horizontalCenter: parent.horizontalCenter
-            fontSize: 14
-            color: Theme.color.onSurfaceColor
-            text: (player.hifiVolumeKind === "hardware"
-                       ? i18n.t("settings.hifiVolume.hardware")
-                       : player.hifiVolumeKind === "software"
-                           ? i18n.t("settings.hifiVolume.software")
-                           : i18n.t("settings.hifiVolume.generic"))
-                  + " · " + Math.round(player.volume * 100) + "%"
-        }
-
-        Slider {
-            id: hudSlider
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.margins: 12
-            from: 0
-            to: 1
-            value: player.volume
-            onMoved: {
-                volumeHud.shown = true
-                hudHide.restart()
-                player.setVolume(value)
-            }
-        }
-
-        Timer {
-            id: hudHide
-            interval: 2200
-            onTriggered: volumeHud.shown = false
-        }
     }
 
     // Windows custom title bar. DesktopWindow now registers a live hostWindow

@@ -47,11 +47,13 @@ public interface HifiOutputControl {
     void setFollowSampleRate(boolean on);
 
     /** Live answer to "does the app's volume slider drive a digital gain right
-     *  now?". Only a digital attenuation gets the perceptual volume curve: a
-     *  hardware level is already a dB mapping of its own, so curving it again
-     *  would double the steepness. Hosts whose slider is always digital return
-     *  true; the exclusive dispatcher reports the mode actually in effect on the
-     *  open stream. Default true so older hosts and test doubles keep compiling. */
+     *  now — the gain the perceptual volume curve was built for?". A hardware
+     *  level is already a dB mapping of its own, so curving it again would double
+     *  the steepness, and the framework path keeps the host's plain linear app
+     *  volume instead of our curve. Hosts whose slider is always digital return
+     *  true; the Android dispatcher answers true only while its exclusive stream
+     *  is up with the slider on the digital end. Default true so older hosts and
+     *  test doubles keep compiling. */
     default boolean softwareVolumeActive() {
         return true;
     }

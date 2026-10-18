@@ -717,15 +717,17 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
                 ? directBackend.volumeKind() : "";
     }
 
-    /** Live: true unless the direct stream is up and the slider is really writing
-     *  the DAC's own control. The system path (MediaPlayer) and a fallback both
-     *  attenuate digitally, so those get the perceptual volume curve; a hardware
-     *  level does not. */
+    /** Live: true only while the exclusive stream is up and the slider drives a
+     *  digital gain on it — that is the level the perceptual volume curve was
+     *  built for. A hardware level is already a dB mapping of its own, so it is
+     *  exempt; the framework path (MediaPlayer) and a fallback keep the host's own
+     *  plain linear app volume, which the framework mixes on top of its stream
+     *  volume. */
     @Override
     public boolean softwareVolumeActive() {
-        if (!hifiEnabled) return true;
+        if (!hifiEnabled) return false;
         AndroidDirectAudioBackend directBackend = direct;
-        if (directBackend == null || active != directBackend) return true;
+        if (directBackend == null || active != directBackend) return false;
         return !directBackend.hardwareVolumeActive();
     }
 
