@@ -30,6 +30,9 @@ desktop-host/src/main/java/dev/t1m3/qplayer/desktop/tools/
 
 # Local dev memo — never committed
 /本地开发备忘.md
+
+# QHIFI cross-session memo (this fork's local, machine-specific notes) — never committed
+/CLAUDE.md
 .tmp/
 
 # JVM crash dumps. This machine runs close to its memory limit, so a build or
