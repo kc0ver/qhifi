@@ -385,6 +385,8 @@ private:
     // causes: the decode side stopped feeding, or the device stopped consuming.
     int64_t totalWrittenBytes_ = 0;   // caller bytes accepted into the ring
     int64_t starvedUrbs_ = 0;         // URBs submitted with an empty ring
+    int64_t flushCount_ = 0;          // flush() calls: a storm here drains the ring
+    int64_t flushedBytes_ = 0;        // real audio discarded by flush()
     // Payload audit: a single zero-filled buffer is a legitimate transient
     // (fade, underrun), so only a *continuously* constant payload is reported.
     bool payloadLive_ = false;
@@ -896,6 +898,10 @@ void UacStream::pause() {
 
 void UacStream::flush() {
     std::lock_guard<std::mutex> guard(mutex_);
+    flushCount_++;
+    flushedBytes_ += ringBytes_;
+    LOGI("flush: discarding ring=%lld inflight=%lld (flush #%lld)",
+         (long long) ringBytes_, (long long) inFlightBytes_, (long long) flushCount_);
     ringRead_ = ringWrite_ = 0;
     ringBytes_ = 0;
     // In-flight URBs still carry their payload; discard them so the device does
@@ -1216,6 +1222,7 @@ void UacStream::feedLoop() {
     int64_t beatReaps = 0;
     int64_t lastWritten = 0;
     int64_t lastStarved = 0;
+    int64_t lastFlushes = 0;
     while (running_) {
         {
             std::unique_lock<std::mutex> guard(mutex_);
@@ -1247,13 +1254,18 @@ void UacStream::feedLoop() {
                 }
                 int64_t writtenDelta = totalWrittenBytes_ - lastWritten;
                 int64_t starvedDelta = starvedUrbs_ - lastStarved;
+                int64_t flushDelta = flushCount_ - lastFlushes;
                 lastWritten = totalWrittenBytes_;
                 lastStarved = starvedUrbs_;
+                lastFlushes = flushCount_;
                 LOGI("beat: wrote=%lldB/2s ring=%lld/%zu inflight=%lldB urbs=%d"
-                     " reaps=%lld starved=%lld payload=%s fbRate=%lld",
+                     " reaps=%lld starved=%lld flushes=%lld flushedTotal=%lldB"
+                     " payload=%s fbRate=%lld",
                      (long long) writtenDelta, (long long) ringBytes_, ring_.size(),
                      (long long) inFlightBytes_, inFlight, (long long) beatReaps,
-                     (long long) starvedDelta, payloadLive_ ? "live" : "stuck",
+                     (long long) starvedDelta, (long long) flushDelta,
+                     (long long) flushedBytes_,
+                     payloadLive_ ? "live" : "stuck",
                      (long long) feedbackRate_);
             }
             // (The DAC's own volume is deliberately NOT read back here. This

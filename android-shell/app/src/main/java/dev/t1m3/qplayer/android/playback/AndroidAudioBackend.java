@@ -312,6 +312,14 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
 
     @Override
     public synchronized void notifyCacheComplete() {
+        // Do not rebuild MediaPlayer mid-track. The switch only saves the tail of
+        // an already-playing stream from coming off the network, and it costs a
+        // hard gap: release + a fresh player + prepareAsync + start, with nothing
+        // buffered to bridge it (the first play of an uncached track was audible
+        // as a stutter at the download-complete moment). The finished file still
+        // serves the next play, and tryPlayCompleteCache remains as the rescue
+        // when the stream itself stalls.
+        if (prepared && wantPlay) return;
         tryPlayCompleteCache();
     }
 

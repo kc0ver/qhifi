@@ -55,6 +55,10 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     private static final long STALL_TIMEOUT_MS = 3000L;
     private static final int MAX_RESTARTS_PER_SOURCE = 3;
     private static final long OPEN_PROBE_TIMEOUT_MS = 1500L;
+    /** How far before a reopen's seam the cache file is seeked, so the decoder
+     *  is already producing audio by the time it reaches it (the first samples
+     *  are trimmed away, see {@link #drainOutput}). */
+    private static final long REOPEN_SEEK_BACK_MS = 300L;
 
     private final Context appContext;
     private final AudioManager audioManager;
@@ -79,6 +83,10 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     private long wantedSerial;
     private boolean desiredPlaying;
     private long pendingSeekMs = -1L;
+    /** PTS the cache-file reopen's decoder must be measured against: a seek lands
+     *  on the sync sample at or BEFORE the target, so whatever comes first may be
+     *  audio the ring already played. -1 when nothing is armed. */
+    private long reopenTargetUs = -1L;
     private boolean pendingReopen;
     private long pendingReopenFromMs;
     private String pendingReopenSource = "";
@@ -496,6 +504,24 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
     }
 
+    /** Ring depth right now (queued + in-flight), in ms — diagnostics only. */
+    private long bufferedMs() {
+        synchronized (lock) {
+            int rate = outputRate > 0 ? outputRate : sink.sampleRate();
+            if (rate <= 0) return 0L;
+            return sink.bufferedFrames() * 1000L / rate;
+        }
+    }
+
+    /** Diagnostics only: one consistent snapshot of the position bookkeeping. */
+    private String positionDebug() {
+        synchronized (lock) {
+            return "pos=" + position() + "ms base=" + positionBaseMs + "ms/"
+                    + positionBaseFrames + "f rate=" + outputRate
+                    + " written=" + sink.framesWritten() + "f ringMs=" + bufferedMs();
+        }
+    }
+
     @Override
     public void setVolume(float volume) {
         int percent = Math.round(Math.max(0f, Math.min(1f, volume)) * 100f);
@@ -544,10 +570,17 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         synchronized (lock) {
             path = cacheCompletePath;
             if (path == null || path.equals(requestedSource)) return;
-            // Same behaviour as the system backend: once the download finished, the
-            // rest of the track comes from the complete file rather than from a
-            // network stream that may be about to expire. Moving the source here as
-            // well keeps later snapshots pointed at the file that is playing now.
+            // Never swap sources mid-playback. The switch only buys the last few
+            // seconds of the track off the network instead of the finished file,
+            // and it costs an audible join: the HTTP and file paths prime their
+            // decoders differently, so the PCM the file hands over is not the PCM
+            // the ring already holds — heard as a short repeat at the join. The
+            // finished file is picked up by the next play (playAt prefers it) and
+            // by a reopen while paused, so nothing is lost by leaving it alone.
+            if (desiredPlaying && !closed) {
+                Logger.info("direct: cache complete, keeping the stream");
+                return;
+            }
             pendingReopen = true;
             pendingReopenFromMs = position();
             pendingReopenSource = path;
@@ -720,9 +753,18 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                     outputDone = false;
                 }
                 if (extractor == null) {
-                    long startMs = pending.seekMs >= 0L ? pending.seekMs
-                            : pending.reopenFromMs >= 0L ? pending.reopenFromMs : position();
-                    PcmSource opened = openSource(pending.source, pending.headers, startMs);
+                    boolean isReopen = pending.reopenFromMs >= 0L;
+                    // The seam a reopen has to land on is the ring's head — the audio the
+                    // cache file continues from. A plain seekTo lands on a sync sample on
+                    // either side of it, which came out as a short skip at the switch, so
+                    // seek slightly before the seam and trim the leading samples up to it.
+                    long seamMs = pending.seekMs >= 0L ? pending.seekMs : position();
+                    long startMs = isReopen
+                            ? Math.max(0L, seamMs - REOPEN_SEEK_BACK_MS) : seamMs;
+                    if (isReopen) Logger.info("direct reopen begin: {}", positionDebug());
+                    long openT0 = System.currentTimeMillis();
+                    PcmSource opened = openSource(pending.source, pending.headers, startMs,
+                            isReopen);
                     if (opened == null) {
                         fireError(sink.lastError().isEmpty()
                                 ? "cannot open source" : sink.lastError());
@@ -733,6 +775,12 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                     extractor = opened.extractor;
                     codec = opened.codec;
                     serial = pending.serial;
+                    Logger.info("direct open: {}ms reopen={} ringMs={} {}",
+                            System.currentTimeMillis() - openT0,
+                            isReopen, bufferedMs(),
+                            pending.source.startsWith("http") ? "net" : "local");
+                    Logger.info("direct open done: {} reopen={}", positionDebug(), isReopen);
+                    if (isReopen) reopenTargetUs = seamMs * 1000L;
                     // A reopen (the cache-file switch) is the SAME source: it
                     // must not re-fire onStarted — with the fade enabled that
                     // restarts the ramp and dips the volume mid-track — nor
@@ -772,6 +820,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                     acquireWakeLock();
                     holdWifiLock();
                     scheduleStallCheck();
+                    Logger.info("direct start: ringMs={}", bufferedMs());
                     fire(onStarted);
                 }
                 if (outputDone) {
@@ -887,11 +936,15 @@ final class AndroidDirectAudioBackend implements AudioBackend {
      * produce. The sink is built from what the decoder reports, not from what the
      * source claims, so a decoder that quietly resamples is reported truthfully.
      */
-    private PcmSource openSource(String src, Map<String, String> headers, long startMs) {
+    private PcmSource openSource(String src, Map<String, String> headers, long startMs,
+                                 boolean reopen) {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec codec = null;
+        long tOpen0 = System.currentTimeMillis();
+        long tDs, tDepth, tCodec, tProbe;
         try {
             setDataSource(extractor, src, headers);
+            tDs = System.currentTimeMillis();
             int track = selectAudioTrack(extractor);
             if (track < 0) {
                 Logger.warn("direct: no audio track in {}", src);
@@ -918,6 +971,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
             int srcChannels = format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
                     ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
             int srcDepth = probeBitDepth(src);
+            tDepth = System.currentTimeMillis();
             // Ask for float PCM where the decoder will give it: that keeps a 24-bit
             // source's extra bits instead of truncating them. The USB path is the
             // one exception — a 16-bit source can then pass through unaltered, and
@@ -936,7 +990,9 @@ final class AndroidDirectAudioBackend implements AudioBackend {
             if (startMs > 0L) {
                 extractor.seekTo(startMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
             }
-            MediaFormat out = awaitOutputFormat(codec);
+            tCodec = System.currentTimeMillis();
+            MediaFormat out = awaitOutputFormat(extractor, codec);
+            tProbe = System.currentTimeMillis();
             synchronized (lock) {
                 sourceEncoding = AndroidHifiProbe.encodingLabel(mime);
                 sourceRate = srcRate;
@@ -944,7 +1000,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 durationMs = durationUs > 0L ? durationUs / 1000L : 0L;
                 readPcmFormat(out, srcRate, srcChannels);
             }
-            if (!openSink()) {
+            if (!openSink(reopen)) {
                 synchronized (lock) {
                     lastError = sink.lastError();
                     opened = false;
@@ -952,6 +1008,10 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 closeMedia(codec, extractor);
                 return null;
             }
+            Logger.info("direct open parts: ds={}ms depth={}ms codec={}ms probe={}ms sink={}ms {}",
+                    tDs - tOpen0, tDepth - tDs, tCodec - tDepth, tProbe - tCodec,
+                    System.currentTimeMillis() - tProbe,
+                    src.startsWith("http") ? "net" : "local");
             PcmSource openedSource = new PcmSource();
             openedSource.extractor = extractor;
             openedSource.codec = codec;
@@ -967,11 +1027,31 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     }
 
     /** The decoder's own format only appears after it has produced a buffer. */
-    private MediaFormat awaitOutputFormat(MediaCodec codec) {
+    private MediaFormat awaitOutputFormat(MediaExtractor extractor, MediaCodec codec) {
+        // A decoder emits nothing until input has been queued: polling
+        // dequeueOutputBuffer alone (as this used to) could therefore never
+        // succeed, and every source open — local file or stream alike — paid the
+        // whole deadline before the sink was even opened. That is why the ring
+        // was still empty when playback started, and why the 800 ms of buffered
+        // audio could not cover the mid-track cache-file switch. Feed a buffer
+        // and the format arrives in milliseconds; the deadline is only a backstop
+        // for a decoder that genuinely refuses to produce one.
         long deadline = System.currentTimeMillis() + OPEN_PROBE_TIMEOUT_MS;
         MediaCodec.BufferInfo probe = new MediaCodec.BufferInfo();
         while (System.currentTimeMillis() < deadline) {
-            int index = codec.dequeueOutputBuffer(probe, 50_000L);
+            int in = codec.dequeueInputBuffer(0L);
+            if (in >= 0) {
+                ByteBuffer input = codec.getInputBuffer(in);
+                int size = input != null ? extractor.readSampleData(input, 0) : -1;
+                if (size < 0) {
+                    codec.queueInputBuffer(in, 0, 0, 0L,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                } else {
+                    codec.queueInputBuffer(in, 0, size, extractor.getSampleTime(), 0);
+                    extractor.advance();
+                }
+            }
+            int index = codec.dequeueOutputBuffer(probe, 10_000L);
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 return codec.getOutputFormat();
             }
@@ -1010,7 +1090,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     /** Open the sink for the format the decoder reported. The USB driver ignores
      *  framework routing entirely — it finds its own DAC and always runs at the
      *  source's rate, which is the entire point of an exclusive stream. */
-    private boolean openSink() {
+    private boolean openSink(boolean reopen) {
         int decodedRate;
         int channels;
         boolean floatPcm;
@@ -1045,7 +1125,12 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 outputEncoding = "PCM";
                 outputBitDepth = sink instanceof UsbIsoSink
                         ? ((UsbIsoSink) sink).bitDepth() : 0;
-                positionBaseFrames = sink.framesWritten();
+                // Re-base the frame counter only for a genuinely new source, where
+                // play() re-based the position pair to match. A reopen (the mid-track
+                // cache-file switch) is the SAME source: the ring and the counter both
+                // carry on, so re-basing the frames alone snapped the reported position
+                // back to positionBaseMs — the bar jumping from 0:03 to 0:00.
+                if (!reopen) positionBaseFrames = sink.framesWritten();
                 // Nothing is adopted from a REUSED sink: its level has not changed,
                 // and the value used here is the app's own level (a digital gain in
                 // software mode, which is NOT the same scale as a slider position).
@@ -1057,7 +1142,11 @@ final class AndroidDirectAudioBackend implements AudioBackend {
             sink.setVolume(volume / 100f);
             return true;
         }
-        if (sink.isOpen()) sink.close();   // format change: rebuild for the new one
+        if (sink.isOpen()) {
+            Logger.info("direct sink rebuild: {}Hz/ch{} -> {}Hz/ch{}",
+                    sink.sampleRate(), sink.channels(), decodedRate, channels);
+            sink.close();   // format change: rebuild for the new one
+        }
         if (!sink.open(decodedRate, channels, floatPcm, -1)) return false;
         synchronized (lock) {
             opened = true;
@@ -1175,18 +1264,54 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
         if (index < 0) return false;
         boolean eos = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-        if (info.size > 0) {
+        int offset = info.offset;
+        int size = info.size;
+        if (reopenTargetUs >= 0L && size > 0) {
+            // A reopen's first buffers are the seek's own lead-in. The seam is the
+            // ring's head, and everything before it has already been played out of
+            // the ring, so it is dropped — whole buffers, or trimmed off the head of
+            // the one that straddles the seam, keeping the join sample exact.
+            long seam = reopenTargetUs;
+            int bpf = sourceFrameBytes();
+            int rate = outputRate;
+            long pts = info.presentationTimeUs;
+            long durUs = bpf > 0 && rate > 0 && size >= bpf
+                    ? (size / bpf) * 1_000_000L / rate : 0L;
+            if (durUs > 0L && pts + durUs <= seam) {
+                codec.releaseOutputBuffer(index, false);
+                return false;
+            }
+            if (bpf > 0 && rate > 0 && pts < seam) {
+                int skip = (int) Math.min(size, ((seam - pts) * rate / 1_000_000L) * bpf);
+                Logger.info("direct reopen seam: trimmed {}B of {}B (pts={}us seam={}us)",
+                        skip, size, pts, seam);
+                offset += skip;
+                size -= skip;
+            } else {
+                Logger.info("direct reopen seam: pts={}us seam={}us", pts, seam);
+            }
+            reopenTargetUs = -1L;
+        }
+        if (size > 0) {
             ByteBuffer buffer = codec.getOutputBuffer(index);
             if (buffer != null) {
-                buffer.position(info.offset);
-                buffer.limit(info.offset + info.size);
-                if (sink.write(buffer, info.size) < 0) {
+                buffer.position(offset);
+                buffer.limit(offset + size);
+                if (sink.write(buffer, size) < 0) {
                     throw new IllegalStateException("direct sink write failed: " + sink.lastError());
                 }
             }
         }
         codec.releaseOutputBuffer(index, false);
         return eos;
+    }
+
+    /** Bytes one source frame occupies in the PCM handed to the sink. */
+    private int sourceFrameBytes() {
+        synchronized (lock) {
+            int channels = outputChannels > 0 ? outputChannels : 2;
+            return channels * ("PCM float".equals(outputEncoding) ? 4 : 2);
+        }
     }
 
     /** Re-position both halves of the pipeline: flush the decoder, seek the
