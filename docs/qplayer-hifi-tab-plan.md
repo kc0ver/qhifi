@@ -1,5 +1,7 @@
 # QPlayer HiFi 标签页实施方案（Android）
 
+> **⚠️ 本文档已过时（历史方案，勿据其实现）**：期 1（HiFi 标签 / 设置项 / 链路显示）已落地，但期 2 的「Android 14 bit-perfect 直通（AudioTrack + `setPreferredMixerAttributes`）」在目标 ROM 上不可用（厂商未在 HAL 声明位完美能力），且本文档「不写 native USB UAC2 驱动」的边界已被实际架构推翻 —— 项目核心正是**裸 usbfs 用户态 UAC2 等时驱动**（见 `android-shell/app/src/main/cpp/uac_output.cpp`）。本文档仅作历史记录保留。
+
 > 目标读者：负责编码的 agent。
 > 范围：**仅 Android**。桌面宿主（desktop-host）不做任何改动。
 > 说明：未收到设置页截图，标签位置依据代码现状确认——`SettingsCatalog.CATEGORIES` 当前顺序为
