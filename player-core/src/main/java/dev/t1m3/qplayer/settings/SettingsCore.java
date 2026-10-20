@@ -40,6 +40,10 @@ import java.util.function.Supplier;
  */
 public final class SettingsCore extends QObject implements LyricCompositor.SettingsBridge {
     private static final String APP_VOLUME_KEY = "volume";
+    /** The app's own USB exclusive stream keeps its level under its own key: it
+     *  is a separate route from the framework's, and one shared number would come
+     *  back on the other route at a different loudness after every switch. */
+    private static final String EXCLUSIVE_VOLUME_KEY = "hifiExclusiveVolume";
 
     /** Resolved dark flag (mode + system state), read by Main.qml's StyleManager
      *  binding. Derived, never persisted. */
@@ -59,6 +63,12 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     /** App-local playback gain in percent. Stored outside the generated catalog
      *  because its controls live in player chrome, not on the settings page. */
     public final Property<Integer> appVolume = new Property<>(80);
+    /** The level the app's own USB exclusive stream keeps, in percent. Its own
+     *  route, its own control (the exclusive volume HUD), its own storage — so a
+     *  number set there never lands on the mixed framework path. Defaults to half
+     *  scale: an open used to inherit whatever level the DAC happened to sit at,
+     *  and a DAC parked at 0 dB arrives as full scale. */
+    public final Property<Integer> exclusiveVolume = new Property<>(50);
 
     private final Map<String, SettingSpec> specsByKey = new LinkedHashMap<>();
     private final Map<String, Property<Object>> values = new HashMap<>();
@@ -177,6 +187,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         this.store = store;
         this.platform = platform;
         appVolume.set(Math.max(0, Math.min(100, store.getInt(APP_VOLUME_KEY, 80))));
+        exclusiveVolume.set(Math.max(0, Math.min(100, store.getInt(EXCLUSIVE_VOLUME_KEY, 50))));
         migrateLegacyKeys();
         this.specs = new ArrayList<>();
         for (SettingSpec s : SettingsCatalog.specs()) {
@@ -263,27 +274,35 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         apply(spec, v);
     }
 
-    /** Persist and apply the app-local gain used by the player chrome. */
+    /** Persist and apply the app-local gain used by the player chrome. The gain
+     *  belongs to whichever route owns the output right now: while the app's own
+     *  USB stream holds it, the framework's stored level is deliberately left
+     *  alone — writing the exclusive number into it is exactly how the level set
+     *  on one route came back as the other's attenuation after a switch. */
     public void setAppVolume(int percent) {
         int clamped = Math.max(0, Math.min(100, percent));
-        if (clamped == appVolume.peek()) return;
-        appVolume.set(clamped);
-        if (store != null) store.putInt(APP_VOLUME_KEY, clamped);
+        boolean exclusive = controller != null && !controller.hifiVolumeKind.peek().isEmpty();
+        Property<Integer> target = exclusive ? exclusiveVolume : appVolume;
+        if (clamped == target.peek()) return;
+        target.set(clamped);
+        if (store != null) store.putInt(exclusive ? EXCLUSIVE_VOLUME_KEY : APP_VOLUME_KEY, clamped);
         if (controller != null) controller.setVolume(clamped / 100f);
     }
 
     /** Follow the level the backend is actually playing at, without driving it:
-     *  the DAC's own control adopted at open, the Android volume keys and the HiFi
-     *  HUD all move {@code controller} directly, and a store value left behind by
-     *  those would be written back over them on the next settings push. So the
-     *  stored app volume is a mirror of that live level, not a second truth.
-     *  Deliberately no {@code controller.setVolume} here — that level is already
-     *  in flight, and pushing it back would repeat a DAC hardware write. */
-    public void noteVolumeFromHost(float level) {
+     *  the Android volume keys and the HiFi HUD both move {@code controller}
+     *  directly, and a store value left behind by those would be written back
+     *  over them on the next settings push. So the stored level is a mirror of
+     *  that live level, not a second truth. {@code exclusive} picks which route's
+     *  store it belongs to. Deliberately no {@code controller.setVolume} here —
+     *  that level is already in flight, and pushing it back would repeat a DAC
+     *  hardware write. */
+    public void noteVolumeFromHost(float level, boolean exclusive) {
         int percent = Math.round(Math.max(0f, Math.min(1f, level)) * 100f);
-        if (percent == appVolume.peek()) return;
-        appVolume.set(percent);
-        if (store != null) store.putInt(APP_VOLUME_KEY, percent);
+        Property<Integer> target = exclusive ? exclusiveVolume : appVolume;
+        if (percent == target.peek()) return;
+        target.set(percent);
+        if (store != null) store.putInt(exclusive ? EXCLUSIVE_VOLUME_KEY : APP_VOLUME_KEY, percent);
     }
 
     /** Stepper -/+ , clamped. Keeps the arithmetic out of every generated row. */
@@ -568,6 +587,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private void pushToController() {
         if (controller == null) return;
         controller.setVolume(appVolume.peek() / 100f);
+        controller.restoreExclusiveVolume(exclusiveVolume.peek() / 100f);
         controller.setMonetEnabled(bool("monet"));
         controller.setUpdateMirror(bool("mirror"));
         controller.setFadeEnabled(bool("fade"));

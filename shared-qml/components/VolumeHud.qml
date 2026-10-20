@@ -88,7 +88,10 @@ Rectangle {
     Timer {
         id: appVolumeCommit
         interval: 400
-        onTriggered: settings.noteVolumeFromHost(player.volume)
+        // Which route's store this level belongs to: the card only ever shows the
+        // app's own USB stream's level, so the mirror must not write it into the
+        // framework's value (that is the inheritance the card used to cause).
+        onTriggered: settings.noteVolumeFromHost(player.volume, volumeHud.hifiLevelLive)
     }
 
     Timer {

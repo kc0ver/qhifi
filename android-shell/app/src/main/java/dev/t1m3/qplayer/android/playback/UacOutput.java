@@ -55,11 +55,6 @@ final class UacOutput {
     /** True once a hardware volume control was found on the opened device. */
     static native boolean hasHardwareVolume();
 
-    /** The DAC's own level at open, mapped to the app's 0..1 with the same
-     *  curve the writes use, or -1 when it could not be read. Readable only
-     *  before the isochronous stream starts. */
-    static native float initialVolume();
-
     /** Diagnostic: log every channel's reported range, then sweep the volume
      *  down a ladder of dB values with a readback after each. Blocking — run it
      *  off the main thread. */

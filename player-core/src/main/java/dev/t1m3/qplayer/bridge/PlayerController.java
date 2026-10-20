@@ -448,7 +448,13 @@ public final class PlayerController {
     private Runnable fadeCompleteAction;
     // Separate from the QML Property so the audio clock can read it safely and a fade
     // never mistakes its current effective gain for the user's requested volume.
-    private volatile float userVolume = 0.8f;
+    // Two levels, one per output route: the exclusive USB stream owns its own level
+    // (a hardware mapping or a digital gain, never the framework's), and the mixed
+    // framework path owns its own. Sharing one level made the number set on either
+    // side reappear on the other at a different loudness — the exclusive level is
+    // read off a different scale (see volumeGain) than the framework's linear one.
+    private volatile float frameworkVolume = 0.8f;
+    private volatile float exclusiveVolume = 0.5f;
     // Set once a fade-out has been STARTED for the CURRENT track, so pump()'s
     // near-the-end check doesn't keep re-triggering it every tick for the
     // remainder of playback.
@@ -1033,6 +1039,12 @@ public final class PlayerController {
             }
             notifyPlayback();
             startFadeIn();
+            // The route that owns the output just changed — the app's own USB
+            // stream or the framework's mixed path — and each keeps its own level.
+            // The ramp above already pushed that level to the sink; the slider must
+            // now show the same number, or the next key press would step from a
+            // value the output is not on.
+            post(() -> volume.set(activeLevel()));
             // The source's own format is only known once it actually opened, so
             // this is the first moment the chain readout can be accurate for it.
             refreshHifiStatus();
@@ -2548,8 +2560,21 @@ public final class PlayerController {
         // before the fade multiplies on top (the fade stays a linear multiplier:
         // the curve applies to the user's level, not to the fade's own gain).
         // A hardware level is exempt: that path is already a dB mapping.
-        float level = volumeIsDigital() ? volumeGain(userVolume) : userVolume;
+        float level = volumeIsDigital() ? volumeGain(activeLevel()) : activeLevel();
         backend.setVolume(level * clampGain(gain));
+    }
+
+    /** The level that drives whatever route owns the output right now: the
+     *  exclusive stream's own, or the framework path's own. */
+    private float activeLevel() {
+        return exclusiveRouteOwns() ? exclusiveVolume : frameworkVolume;
+    }
+
+    /** True while the app's own USB stream — not the framework's mixed path —
+     *  holds the output, so the slider is on the exclusive route's level. */
+    private boolean exclusiveRouteOwns() {
+        HifiOutputControl hifi = hifiControl();
+        return hifi != null && hifi.exclusiveLevelActive();
     }
 
     /** Exponent of the perceptual volume curve: gain = position ^ gamma. gamma=3
@@ -5794,18 +5819,32 @@ public final class PlayerController {
         return propertyPosition != null ? Math.max(0L, propertyPosition) : 0L;
     }
 
-    /** The user's own level, 0..1 — what {@link #setVolume} last accepted. A host
-     *  that adjusts it without the QML slider (the Android volume keys) has to read
-     *  it to step from the value actually in use. */
+    /** The level the slider is on right now, 0..1 — whichever route owns the
+     *  output. A host that adjusts it without the QML slider (the Android volume
+     *  keys) reads it to step from the value actually in use. */
     public float volumeValue() {
-        return userVolume;
+        return activeLevel();
     }
 
+    /** Set the level of the route that owns the output: the exclusive stream keeps
+     *  its own, the framework path keeps its own, and switching between them never
+     *  hands one's number to the other. */
     public void setVolume(float v) {
         float clamped = Math.max(0f, Math.min(1f, v));
-        userVolume = clamped;
+        if (exclusiveRouteOwns()) {
+            exclusiveVolume = clamped;
+        } else {
+            frameworkVolume = clamped;
+        }
         applyEffectiveVolume(currentFadeGain());
         volume.set(clamped);
+    }
+
+    /** Restore the exclusive route's own stored level (a settings push at start
+     *  up). Deliberately does not drive anything: which route owns the output is
+     *  a later decision, and the level is applied when one actually starts. */
+    public void restoreExclusiveVolume(float v) {
+        exclusiveVolume = Math.max(0f, Math.min(1f, v));
     }
 
     public void setPlayLevel(String level) {
@@ -5838,10 +5877,13 @@ public final class PlayerController {
         hifiEnabled.set(on);
         HifiOutputControl hifi = hifiControl();
         if (hifi != null) hifi.setHifiEnabled(on);
-        // Turning the direct path on/off can move the slider between a digital
-        // gain and the DAC's own control: re-send the level under the curve that
-        // is now in effect instead of leaving the first press to jump loudness.
+        // Turning the direct path on/off moves the slider between the two routes'
+        // own levels and, within the direct one, between a digital gain and the
+        // DAC's own control: re-send the level under whatever now applies and put
+        // the same number on the slider, instead of leaving the first press to jump
+        // loudness.
         applyEffectiveVolume(currentFadeGain());
+        volume.set(activeLevel());
         refreshHifiStatus();
     }
 
@@ -5981,14 +6023,6 @@ public final class PlayerController {
         hifiExclusiveState.set(status.exclusiveState);
         hifiFallbackReason.set(status.fallbackReason);
         hifiVolumeKind.set(status.volumeKind);
-        if (status.deviceVolume >= 0) {
-            // The DAC's own level at open is the truth: adopt it so the slider,
-            // the volume keys and the device agree from the first press after a
-            // switch. Without this, exclusive open would keep the app's stored
-            // level and the first adjustment would jump loudness.
-            userVolume = status.deviceVolume;
-            volume.set(status.deviceVolume);
-        }
     }
 
     /** "FLAC 24bit/96kHz" / "48kHz/16bit" — the two "unknown" cases collapse

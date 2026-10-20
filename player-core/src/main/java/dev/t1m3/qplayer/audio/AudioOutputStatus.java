@@ -57,10 +57,6 @@ public final class AudioOutputStatus {
      *  DAC's own control, samples untouched), "software" (a digital gain), or ""
      *  when the chain does not say. The volume readout labels itself with this. */
     public final String volumeKind;
-    /** The level the DAC actually plays at after its latest open, 0..1 — the
-     *  app adopts it so switching to exclusive never jumps loudness. -1 when
-     *  nothing was adopted (or already reported). */
-    public final float deviceVolume;
 
     public AudioOutputStatus(String deviceId, String deviceName, String routeType,
                              String sourceEncoding, int sourceSampleRate, int sourceBitDepth,
@@ -95,20 +91,6 @@ public final class AudioOutputStatus {
                              String reason, HifiOutputMode requestedMode,
                              HifiOutputMode effectiveMode, String exclusiveState,
                              String fallbackReason, String volumeKind) {
-        this(deviceId, deviceName, routeType,
-                sourceEncoding, sourceSampleRate, sourceBitDepth,
-                outputEncoding, outputSampleRate, outputBitDepth,
-                resampled, bitPerfectSupported, bitPerfectActive, reason,
-                requestedMode, effectiveMode, exclusiveState, fallbackReason, volumeKind, -1f);
-    }
-
-    public AudioOutputStatus(String deviceId, String deviceName, String routeType,
-                             String sourceEncoding, int sourceSampleRate, int sourceBitDepth,
-                             String outputEncoding, int outputSampleRate, int outputBitDepth,
-                             boolean resampled, boolean bitPerfectSupported, boolean bitPerfectActive,
-                             String reason, HifiOutputMode requestedMode,
-                             HifiOutputMode effectiveMode, String exclusiveState,
-                             String fallbackReason, String volumeKind, float deviceVolume) {
         this.deviceId = deviceId != null ? deviceId : "";
         this.deviceName = deviceName != null ? deviceName : "";
         this.routeType = routeType != null ? routeType : AudioOutputDevice.ROUTE_BUILTIN;
@@ -127,17 +109,6 @@ public final class AudioOutputStatus {
         this.exclusiveState = exclusiveState != null ? exclusiveState : EXCLUSIVE_NONE;
         this.fallbackReason = fallbackReason != null ? fallbackReason : "";
         this.volumeKind = volumeKind != null ? volumeKind : "";
-        this.deviceVolume = deviceVolume;
-    }
-
-    /** Same snapshot with the adopted device level attached (the dispatcher
-     *  reports it exactly once per stream open). */
-    public AudioOutputStatus withDeviceVolume(float value) {
-        return new AudioOutputStatus(deviceId, deviceName, routeType, sourceEncoding,
-                sourceSampleRate, sourceBitDepth, outputEncoding, outputSampleRate,
-                outputBitDepth, resampled, bitPerfectSupported, bitPerfectActive,
-                reason, requestedMode, effectiveMode, exclusiveState, fallbackReason,
-                volumeKind, value);
     }
 
     /** Same measurements, re-labelled with who actually did the dispatching: the

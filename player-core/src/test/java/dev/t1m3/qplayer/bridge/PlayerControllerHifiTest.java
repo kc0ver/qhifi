@@ -166,6 +166,51 @@ public class PlayerControllerHifiTest {
         }
     }
 
+    /** Each route keeps its own level: the number set while the app's own USB
+     *  stream owns the output must not come back as the framework path's
+     *  attenuation after the switch (and the other way round). */
+    @Test
+    public void exclusiveAndFrameworkLevelsStayIndependent() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("hifi-levels").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            VolumeProbeBackend backend = new VolumeProbeBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+
+            // The framework route's own level.
+            backend.exclusive = false;
+            controller.setVolume(0.9f);
+            assertEquals(0.9f, backend.level, 1e-6);
+
+            // The exclusive route's own — and its default is half scale, not the
+            // full scale an open used to inherit from the DAC's own control.
+            backend.exclusive = true;
+            controller.setHifiEnabled(true);
+            assertEquals(0.5f, backend.level, 1e-6);
+            controller.setVolume(0.4f);
+            assertEquals(0.4f, backend.level, 1e-6);
+
+            // Back on the framework route the exclusive number must not follow it:
+            // the level handed to the sink is the framework's own 0.9, not 0.4.
+            backend.exclusive = false;
+            controller.setHifiEnabled(false);
+            assertEquals(0.9f, backend.level, 1e-6);
+
+            // And returning to the exclusive route restores its own 0.4.
+            backend.exclusive = true;
+            controller.setHifiEnabled(true);
+            assertEquals(0.4f, backend.level, 1e-6);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
     /** The refresh runs off the render thread, so a test has to drain the UI
      *  queue itself — the app's own render loop is what normally does it. */
     private static void awaitHifi(PlayerController controller, Condition done)
@@ -203,11 +248,14 @@ public class PlayerControllerHifiTest {
     private static final class VolumeProbeBackend extends FakeAudioBackend
             implements HifiOutputControl {
         boolean digital;
+        boolean exclusive;
         float level = -1f;
 
         @Override public void setVolume(float volume) { level = volume; }
 
         @Override public boolean softwareVolumeActive() { return digital; }
+
+        @Override public boolean exclusiveLevelActive() { return exclusive; }
 
         @Override public List<AudioOutputDevice> outputDevices() {
             return Arrays.asList(new AudioOutputDevice("", "自动（系统默认）",

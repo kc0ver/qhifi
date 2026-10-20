@@ -59,8 +59,6 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     private int volumeMode = 0;
     /** Experimental keep-alive track; see {@link HifiOutputControl#setKeepAliveTrack}. */
     private volatile boolean keepAliveTrack;
-    private int reportedOpenGen = -1;
-    private float pendingDeviceVolume = -1f;
     private String selectedDeviceId = "";
 
     /** The backend every call is currently routed to. */
@@ -629,23 +627,6 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
                 && !base.resampled;
         AudioOutputStatus status = AudioOutputStatus.withRouting(base, requested,
                 effective, exclusive, bitPerfectActive, fallback);
-        // The adopted device level is reported to the UI exactly once per stream
-        // open, so the app's volume slider and the DAC agree from the first press
-        // after a switch — and later status refreshes cannot clobber the user's
-        // own adjustments with a stale snapshot.
-        if (directBackend != null && active == directBackend) {
-            int gen = directBackend.openGen();
-            float adopted;
-            synchronized (lock) {
-                if (gen != reportedOpenGen) {
-                    reportedOpenGen = gen;
-                    pendingDeviceVolume = directBackend.adoptedVolume01();
-                }
-                adopted = pendingDeviceVolume;
-                pendingDeviceVolume = -1f;
-            }
-            if (adopted >= 0) status = status.withDeviceVolume(adopted);
-        }
         return status;
     }
 
@@ -729,6 +710,14 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
         AndroidDirectAudioBackend directBackend = direct;
         if (directBackend == null || active != directBackend) return false;
         return !directBackend.hardwareVolumeActive();
+    }
+
+    /** Same question as {@link #ownsOutputVolume()}: while the app's own stream is
+     *  the one really playing, the slider drives the exclusive route's own level
+     *  rather than the framework's. */
+    @Override
+    public boolean exclusiveLevelActive() {
+        return ownsOutputVolume();
     }
 
     /** The focus state of whichever backend is actually playing, for the

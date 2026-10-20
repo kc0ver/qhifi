@@ -107,13 +107,6 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     private boolean exclusive;
     private String lastError = "";
 
-    /** Volume bookkeeping for the adoption handshake: {@code adoptedVolume01} is
-     *  what the DAC actually plays at after the latest open (its own level, or a
-     *  safe fallback), and {@code openGen} increments per open so the dispatcher
-     *  reports it to the UI exactly once. */
-    private int openGen;
-    private float adoptedVolume01 = -1f;
-
     // --- watchdog state, main thread only ---
     private long lastProgressFrames = -1L;
     private long lastProgressAtMs;
@@ -193,22 +186,6 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         return sink instanceof UsbIsoSink && sink.exclusive()
                 && ((UsbIsoSink) sink).hasHardwareVolume()
                 && ((UsbIsoSink) sink).volumeModeIsHardware();
-    }
-
-    /** Generation of the last sink open; the dispatcher compares this to what it
-     *  has already reported, so the adopted level reaches the UI exactly once. */
-    int openGen() {
-        synchronized (lock) {
-            return openGen;
-        }
-    }
-
-    /** The level the DAC actually plays at after the latest open, 0..1; -1 when
-     *  nothing was adopted yet. */
-    float adoptedVolume01() {
-        synchronized (lock) {
-            return adoptedVolume01;
-        }
     }
 
     // --- AudioBackend ------------------------------------------------------
@@ -603,6 +580,11 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
         thread = decodeThread;
         decodeThread = null;
+        // Hand the DAC's own control back before the route goes away, so a level
+        // this route wrote cannot go on attenuating the framework path afterwards.
+        if (sink instanceof UsbIsoSink) {
+            ((UsbIsoSink) sink).releaseHardwareControl();
+        }
         if (thread != null) {
             // Closing the sink first is what unblocks a decoder sitting in a write.
             sink.close();
@@ -1131,13 +1113,6 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 // carry on, so re-basing the frames alone snapped the reported position
                 // back to positionBaseMs — the bar jumping from 0:03 to 0:00.
                 if (!reopen) positionBaseFrames = sink.framesWritten();
-                // Nothing is adopted from a REUSED sink: its level has not changed,
-                // and the value used here is the app's own level (a digital gain in
-                // software mode, which is NOT the same scale as a slider position).
-                // Reporting it made the volume slider jump to the gain value on
-                // every track switch that reopened nothing.
-                adoptedVolume01 = -1f;
-                openGen++;
             }
             sink.setVolume(volume / 100f);
             return true;
@@ -1159,36 +1134,14 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                     ? ((UsbIsoSink) sink).bitDepth() : 0;
             positionBaseFrames = sink.framesWritten();
         }
-        // Open-time volume: switching to exclusive must never change loudness by
-        // itself. Hardware mode ADOPTS whatever level the DAC's buttons left it at
-        // (readable only before the isochronous stream starts); when that read
-        // fails, hold the level the app last asked for rather than inventing one.
-        // Software mode never writes the DAC at all and owns the level entirely
-        // through the digital gain, so its value is re-asserted unchanged.
-        float reported = -1f;   // nothing adopted unless a hardware level was read
-        if (sink instanceof UsbIsoSink
-                && ((UsbIsoSink) sink).volumeModeIsHardware()) {
-            float adopted = ((UsbIsoSink) sink).adoptedVolume();
-            if (adopted >= 0) {
-                reported = adopted;
-                Logger.info("hifi open volume: adopted device level {}%",
-                        Math.round(adopted * 100));
-            } else {
-                float keep = volume / 100f;
-                sink.setVolume(keep);
-                Logger.info("hifi open volume: device level unreadable, keeping app level {}%",
-                        Math.round(keep * 100));
-            }
-        } else {
-            // The digital gain the app pushed; not clamped — a clamp here is what
-            // quietly overrode the user's setting on an open.
-            sink.setVolume(volume / 100f);
-        }
-        synchronized (lock) {
-            if (reported >= 0) volumePercent = Math.round(reported * 100f);
-            adoptedVolume01 = reported;
-            openGen++;
-        }
+        // Open-time volume: the level belongs to the app's own exclusive route. It
+        // is deliberately NOT read off the DAC — whatever its buttons happened to
+        // leave it at is the device's business, not a level the user picked here,
+        // and a DAC parked at 0 dB would otherwise arrive as full scale. Hardware
+        // mode writes this level onto the DAC's own control; software mode routes
+        // it to the digital gain and never touches the hardware. Not clamped: a
+        // clamp here is what quietly overrode the user's setting on an open.
+        sink.setVolume(volume / 100f);
         return true;
     }
 

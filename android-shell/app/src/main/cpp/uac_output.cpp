@@ -335,7 +335,6 @@ public:
     void setSoftwareVolume(float volume);  // 0..1 as a digital gain
     void probeVolume();                    // diagnostic sweep + readbacks
     int64_t deviceVolumeRaw();             // GET_CUR readback, INT16_MIN when n/a
-    bool initialVolumeRaw(int* raw) const; // the DAC's own level at open, before streaming
     bool writeVolumeRawAll(int16_t raw);   // one value onto every live channel
     int64_t framesQueued();  // ring + in-flight, in frames
 
@@ -770,13 +769,6 @@ int64_t UacStream::deviceVolumeRaw() {
                        wIndex, 2, g, 200);
     if (n != 2) return INT32_MIN;
     return (int16_t) (g[0] | (g[1] << 8));
-}
-
-// The level captured at open(), for the app to adopt instead of stomping.
-bool UacStream::initialVolumeRaw(int* raw) const {
-    if (!opened_ || initialVolumeRaw_ < -32768) return false;
-    *raw = initialVolumeRaw_;
-    return true;
 }
 
 // One-shot diagnostic, run from the debug broadcast: re-asks every channel's
@@ -1358,18 +1350,6 @@ Java_dev_t1m3_qplayer_android_playback_UacOutput_hasHardwareVolume(JNIEnv*, jcla
 JNIEXPORT void JNICALL
 Java_dev_t1m3_qplayer_android_playback_UacOutput_volProbe(JNIEnv*, jclass) {
     gStream.probeVolume();
-}
-
-JNIEXPORT jfloat JNICALL
-Java_dev_t1m3_qplayer_android_playback_UacOutput_initialVolume(JNIEnv*, jclass) {
-    int raw;
-    if (!gStream.initialVolumeRaw(&raw)) return -1.0f;
-    // Same -50..0 dB curve the writes use, so adopting this value and later
-    // writing it back are the same point on the dial.
-    float v = (raw / 256.0f + 50.0f) / 50.0f;
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    return v;
 }
 
 JNIEXPORT jint JNICALL

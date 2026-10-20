@@ -31,10 +31,10 @@ final class UsbIsoSink implements PcmSink {
     private boolean floatPcm;
     /** The source's bit depth, for the driver's alt-setting choice. */
     private int sourceDepth = 16;
-    /** 0 = the app drives the DAC's own control (adopting its level at open);
-     *  1 = the DAC's control is never written and the app attenuates digitally.
-     *  Software is also the fallback whenever the DAC answers no volume
-     *  control, whatever the mode asks for. */
+    /** 0 = the app drives the DAC's own control (the app's exclusive level is
+     *  written onto it), 1 = the DAC's control is never written and the app
+     *  attenuates digitally. Software is also the fallback whenever the DAC
+     *  answers no volume control, whatever the mode asks for. */
     private int volumeMode = 0;
     private float lastVolume = 0.8f;
     private long framesWritten;
@@ -79,20 +79,25 @@ final class UsbIsoSink implements PcmSink {
         return hardwareUsable();
     }
 
-    /** The device's own level at open, 0..1; -1 when it could not be read.
-     *  Only meaningful right after {@link #open} — the DAC refuses reads once
-     *  the stream runs. */
-    float adoptedVolume() {
-        if (!opened) return -1f;
+    /** Hand the DAC's own control back before the route is released. A level the
+     *  app wrote while driving that control would otherwise stay on the device and
+     *  keep attenuating whatever plays next through the framework path, which
+     *  mixes at full scale and expects no hidden hardware trim underneath. Nothing
+     *  to hand back in software mode, which never wrote the control, nor on a DAC
+     *  that answers none. The stream is stopped first: the control endpoint
+     *  measurably drops requests while the isochronous stream runs, so a write
+     *  issued before that would simply be lost. */
+    void releaseHardwareControl() {
+        if (!opened || volumeMode != 0 || !hardwareUsable()) return;
         try {
-            return UacOutput.initialVolume();
-        } catch (Throwable e) {
-            return -1f;
+            UacOutput.pause();
+        } catch (Throwable ignored) {
         }
+        writeHardwareNow(1f);
     }
 
     /** Route {@code volume} per the current mode. Hardware mode: the app is the
-     *  one writer of the DAC's own control (it adopts its level at open). The
+     *  one writer of the DAC's own control. The
      *  two writers cannot both own one control — NetEase solves the same
      *  problem by never writing hardware volume at all — so software mode
      *  deliberately leaves the DAC's control untouched: its buttons stay the

@@ -58,6 +58,17 @@ public interface HifiOutputControl {
         return true;
     }
 
+    /** Live answer to "is the app's volume slider driving the exclusive stream
+     *  right now?". The exclusive stream keeps its own level, separate from the
+     *  framework's: one slider would otherwise hand the level set on the USB path
+     *  straight to the mixed path (and back) on every switch. False wherever no
+     *  exclusive stream owns the output — the framework route, a fallback, and
+     *  desktop all fall back to the host's own app volume. Default false so older
+     *  hosts and test doubles keep compiling. */
+    default boolean exclusiveLevelActive() {
+        return false;
+    }
+
     /** Diagnostic for the {@code focusdump} debug command: the audio-focus state
      *  the active backend currently holds (focus, pending call resume, call mode).
      *  Empty on hosts with no audio focus. */
