@@ -1,5 +1,6 @@
 import QtQuick
 import miuix.Core
+import "../components"
 
 BasicComponent {
     id: row
@@ -25,17 +26,37 @@ BasicComponent {
         }
     }
     endAction: Component {
-        Row {
-            spacing: row.rightText.length > 0 ? 8 : 0
+        Item {
+            id: endItem
+            property real chevronWidth: 10
+            property real gap: row.rightText.length > 0 ? 8 : 0
+            property real capWidth: Math.max(0, (row.width - row.horizontalPadding * 2) * 0.4)
+            property real naturalWidth: probe.implicitWidth + chevronWidth + gap
+            implicitWidth: Math.min(naturalWidth, capWidth)
+            implicitHeight: Math.max(probe.implicitHeight, 16)
+            height: implicitHeight
+
+            // Hidden probe gives the stable natural width; the marquee itself
+            // is explicitly sized below, so no width binding can collapse into
+            // a measure loop (the previous elide attempt did exactly that).
             Text {
+                id: probe
+                visible: false
                 text: row.rightText
                 font.pixelSize: 14
-                color: Theme.color.onSurfaceVariantActions
+            }
+            MarqueeText {
+                width: Math.max(0, endItem.width - endItem.chevronWidth - endItem.gap)
+                text: row.rightText
+                textColor: Theme.color.onSurfaceVariantActions
+                fontSize: 14
                 anchors.verticalCenter: parent.verticalCenter
             }
             Icon {
+                id: chevron
                 name: "chevron_right"
-                width: 10; height: 16
+                x: endItem.width - width
+                width: endItem.chevronWidth; height: 16
                 anchors.verticalCenter: parent.verticalCenter
                 color: Theme.color.onSurfaceVariantActions
             }
