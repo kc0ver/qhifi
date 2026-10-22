@@ -29,6 +29,7 @@ import android.view.KeyEvent;
 
 import io.github.timer_err.qml4j.android.DexClassLoaderBackend;
 import io.github.timer_err.qml4j.android.QmlGLSurfaceView;
+import io.github.timer_err.qml4j.compiler.CompiledScene;
 import io.github.timer_err.qml4j.engine.QmlEngine;
 
 import dev.t1m3.qplayer.audio.MetadataReader;
@@ -37,6 +38,7 @@ import dev.t1m3.qplayer.model.Track;
 import dev.t1m3.qplayer.settings.SettingsCatalog;
 import dev.t1m3.qplayer.settings.SettingsCore;
 import dev.t1m3.qplayer.resources.CompressedResources;
+import dev.t1m3.qplayer.resources.DiskCompiledSceneCache;
 import dev.t1m3.qplayer.resources.DiskDecompressedResourceCache;
 
 import java.io.ByteArrayOutputStream;
@@ -83,6 +85,9 @@ public final class QPlayerActivity extends Activity {
     private static final int REQ_WEB_LOGIN = 4;
     private static final int REQ_PLUGIN_PICK = 5;
     private static final int REQ_FONT_PICK = 6;
+    /** Bump when the persisted scene format or the host/QML context contract
+     *  changes in a way the install timestamp would not catch. */
+    private static final int QML_SCENE_CACHE_SCHEMA = 1;
 
     /** Canonical playlist id awaiting a picked cover image, set right before
      *  launching the gallery picker and consumed in {@link #onActivityResult}. */
@@ -384,6 +389,22 @@ public final class QPlayerActivity extends Activity {
         // wipe it whenever the apk is (re)installed so stale dex never loads.
         java.io.File dexCache = new java.io.File(getCacheDir(), "qml-dex");
         invalidateDexCacheOnReinstall(dexCache);
+        // Experimental: keep qml4j's generated scene classes across launches.
+        // The scene file lives under the same qml-dex directory so the install
+        // stamp wipes it together with the dex files -- the two caches must
+        // never be a different generation. Off means no retained scene at all.
+        java.io.File sceneCacheDir = new java.io.File(dexCache, "scene");
+        DiskCompiledSceneCache sceneCache = null;
+        String sceneCacheKey = null;
+        if (settings.bool(SettingsCatalog.HIFI_QML_SCENE_CACHE_KEY)) {
+            String fingerprint = qmlSceneCacheFingerprint();
+            if (fingerprint != null) {
+                sceneCache = new DiskCompiledSceneCache(sceneCacheDir.toPath(), fingerprint);
+                sceneCacheKey = sceneCache.sceneKey("Main.qml");
+            }
+        } else {
+            deleteRecursively(sceneCacheDir);
+        }
         QmlEngine engine = new QmlEngine(
                 new DexClassLoaderBackend(getClass().getClassLoader(), 26, dexCache));
         float density = getResources().getDisplayMetrics().density;
@@ -392,6 +413,7 @@ public final class QPlayerActivity extends Activity {
         // 1x and be upscaled -- see CoverImage.qml.
         controller.setPixelRatio(density);
         glView = new QmlGLSurfaceView(this, engine, qml, resources, density);
+        glView.setCompilationCache(sceneCache, sceneCacheKey);
         glView.setController(controller);
         glView.setSettings(settings);
         glView.setErrorListener(trace -> runOnUiThread(() -> showError(trace)));
@@ -1162,6 +1184,23 @@ public final class QPlayerActivity extends Activity {
             }
         } catch (Exception e) {
             deleteRecursively(dexCache); // on any doubt, recompile from scratch
+        }
+    }
+
+    /** Identity of the compiled scene for this installed APK. QML is bundled in
+     *  the APK, so the install stamp and version already change whenever the
+     *  sources can; the schema covers qml4j/host-contract upgrades within the
+     *  same app version. */
+    private String qmlSceneCacheFingerprint() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            return info.lastUpdateTime + ":"
+                    + (info.versionName == null ? "" : info.versionName)
+                    + ":" + CompiledScene.FORMAT_VERSION
+                    + ":" + QML_SCENE_CACHE_SCHEMA;
+        } catch (Exception e) {
+            return null;
         }
     }
 

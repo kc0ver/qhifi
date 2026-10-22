@@ -1,4 +1,4 @@
-package dev.t1m3.qplayer.desktop.resources;
+package dev.t1m3.qplayer.resources;
 
 import dev.t1m3.qplayer.util.Logger;
 import io.github.timer_err.qml4j.compiler.CompiledScene;
@@ -227,7 +227,7 @@ public final class DiskCompiledSceneCache implements CompiledSceneCache {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException ignored) {
+        } catch (AtomicMoveNotSupportedException | UnsupportedOperationException ignored) {
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }

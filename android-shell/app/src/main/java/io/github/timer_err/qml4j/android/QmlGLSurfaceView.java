@@ -20,6 +20,7 @@ import io.github.humbleui.skija.FramebufferFormat;
 import io.github.humbleui.skija.Surface;
 import io.github.humbleui.skija.SurfaceOrigin;
 
+import io.github.timer_err.qml4j.compiler.CompiledSceneCache;
 import io.github.timer_err.qml4j.engine.QmlEngine;
 import io.github.timer_err.qml4j.engine.binding.DirtyQueue;
 import io.github.timer_err.qml4j.engine.binding.Property;
@@ -51,6 +52,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     private final String qmlSource;
     private final QmlEngine engine;
     private final ResourceLoader resources;
+    // Host-owned persistent scene cache; set before the GL thread's first load.
+    private volatile CompiledSceneCache compilationCache;
+    private volatile String compilationCacheKey;
     private QmlView view;
     private SkijaGlSurface surface;
     private PlayerController controller;
@@ -81,6 +85,14 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
 
     public void setSplashListener(SplashListener l) {
         this.splashListener = l;
+    }
+
+    /** Reuse the host's persisted generated scene on the first load. Must be
+     *  called before the view is attached (the GL thread loads the scene in
+     *  onSurfaceChanged); null disables the cache. */
+    public void setCompilationCache(CompiledSceneCache cache, String key) {
+        this.compilationCache = cache;
+        this.compilationCacheKey = key;
     }
 
     // Host-drawn lyric page (shared verbatim with the desktop host): the fluid
@@ -571,6 +583,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
             try {
                 if (view == null) {
                     view = QmlView.withStockTypes(engine).resources(resources);
+                    if (compilationCache != null && compilationCacheKey != null) {
+                        view.compilationCache(compilationCache, compilationCacheKey);
+                    }
                     // Cache stable top-level QML subtrees as SkPictures. This must be
                     // enabled before load() so every constructed Item participates in
                     // content invalidation; the lyric compositor also uses the cache-

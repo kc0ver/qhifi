@@ -177,6 +177,10 @@ public final class SettingsCatalog {
      *  platform's own audio bookkeeping, which is where a framework-playing app
      *  always sits. */
     public static final String HIFI_KEEPALIVE_KEY = "hifiKeepAliveAudioTrack";
+    /** Experimental: persist qml4j's compiled QML classes across launches. The
+     *  scene is invalidated with the dex cache on every install/update, so the
+     *  first launch after an update recompiles once and later launches reuse it. */
+    public static final String HIFI_QML_SCENE_CACHE_KEY = "hifiKeepCompiledQml";
 
     private SettingsCatalog() {}
 
@@ -618,6 +622,15 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.hidden(HIFI_DEVICE_KEY, SettingSpec.TEXT, "")
                 .onlyOn(ANDROID)
+                .build());
+        // Experimental QML startup experiment: keep the generated scene classes
+        // across launches. It is independent of the exclusive output switch, so
+        // it can be A/B tested with HIFI output on or off.
+        out.add(SettingSpec.toggle(HIFI_QML_SCENE_CACHE_KEY, HIFI,
+                        "settings.hifiSceneCache.title", false)
+                .desc("settings.hifiSceneCache.desc")
+                .onlyOn(ANDROID)
+                .group("hifiStartup")
                 .build());
 
         // ---- 关于 -----------------------------------------------------------

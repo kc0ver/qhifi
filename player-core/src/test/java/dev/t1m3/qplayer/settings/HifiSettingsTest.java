@@ -25,11 +25,12 @@ public class HifiSettingsTest {
     @Test
     public void everyHifiRowIsAndroidOnly() {
         Set<String> android = keysOn(SettingsCatalog.HIFI, SettingsCatalog.ANDROID);
-        assertEquals(5, android.size());
+        assertEquals(6, android.size());
         assertTrue(android.contains(SettingsCatalog.HIFI_ENABLED_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_KEEPALIVE_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_QML_SCENE_CACHE_KEY));
         assertTrue(android.contains("action:pickHifiDevice"));
 
         // Nothing for the HiFi category at all on desktop: categories() drops a
@@ -52,6 +53,16 @@ public class HifiSettingsTest {
         assertEquals(SettingsCatalog.HIFI_ENABLED_KEY, dependent.dependsOn);
         assertEquals(SettingsCatalog.ANDROID, dependent.platform);
         assertEquals(Boolean.TRUE, dependent.def);
+    }
+
+    @Test
+    public void qmlSceneCacheIsOffByDefaultAndIndependentOfHifiOutput() {
+        SettingSpec cache = spec(SettingsCatalog.HIFI_QML_SCENE_CACHE_KEY);
+        assertEquals(SettingSpec.SWITCH, cache.type);
+        assertEquals(Boolean.FALSE, cache.def);
+        assertEquals(SettingsCatalog.ANDROID, cache.platform);
+        assertEquals("hifiStartup", cache.group);
+        assertEquals("", cache.dependsOn);
     }
 
     /** Only two output modes exist now — the system path and the app's own USB

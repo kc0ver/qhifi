@@ -14,7 +14,7 @@ import dev.t1m3.qplayer.desktop.media.MacMediaControls;
 import dev.t1m3.qplayer.desktop.media.MprisControls;
 import dev.t1m3.qplayer.desktop.media.WindowsMediaControls;
 import dev.t1m3.qplayer.desktop.resources.ClasspathResourceLoader;
-import dev.t1m3.qplayer.desktop.resources.DiskCompiledSceneCache;
+import dev.t1m3.qplayer.resources.DiskCompiledSceneCache;
 import dev.t1m3.qplayer.resources.DiskDecompressedResourceCache;
 import dev.t1m3.qplayer.desktop.security.DesktopCredentialProtection;
 import dev.t1m3.qplayer.desktop.settings.DesktopThemeMonitor;

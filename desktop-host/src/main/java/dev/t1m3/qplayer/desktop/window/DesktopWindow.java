@@ -6,7 +6,7 @@ import io.github.timer_err.qml4j.render.ResourceLoader;
 import io.github.timer_err.qml4j.render.items.core.Item;
 
 import dev.t1m3.qplayer.bridge.PlayerController;
-import dev.t1m3.qplayer.desktop.resources.DiskCompiledSceneCache;
+import dev.t1m3.qplayer.resources.DiskCompiledSceneCache;
 import dev.t1m3.qplayer.lyric.skia.Fonts;
 import dev.t1m3.qplayer.resources.CompressedResources;
 import dev.t1m3.qplayer.settings.SettingsCore;
