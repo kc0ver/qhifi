@@ -294,7 +294,7 @@ are atomic. Old credential ciphertext and metadata remain available for one
 rollback-compatible release after a successful plugin handoff; migration never
 deletes the only readable copy first.
 
-QPlayer ships a hardcoded list of known plugin repositories (`PluginCatalogService.SOURCES`),
+QPlayer ships a built-in catalog of known plugin repositories (`player-core/src/main/resources/dev/t1m3/qplayer/plugin/plugin-catalog.json`),
 each pinned to its GitHub `owner/repo` and its publisher public key. The offered
 version is whatever that repository's latest GitHub release publishes as a
 `.qplug` asset, so a plugin ships updates on its own schedule without a QPlayer
