@@ -212,6 +212,9 @@ final class UsbIsoSink implements PcmSink {
         if ("err:noaudio".equals(token) || "err:desc".equals(token) || "err:fd".equals(token)) {
             return I18n.tr("settings.hifiChain.reason.usbOpenFailed");
         }
+        if ("err:usbLost".equals(token)) {
+            return I18n.tr("settings.hifiChain.reason.deviceGone");
+        }
         return token;
     }
 
@@ -220,7 +223,11 @@ final class UsbIsoSink implements PcmSink {
         if (!opened || bytes <= 0) return 0;
         int written = UacOutput.write(src, bytes);
         if (written < 0) {
-            lastError = I18n.tr("settings.hifiChain.reason.usbOpenFailed");
+            lastError = mapError(UacOutput.lastError());
+            Logger.warn("usb exclusive write failed: {}", lastError);
+            // The wire is dead (URB submission refused): close so the next open
+            // re-claims the current DAC instead of reusing this fd.
+            close();
             return -1;
         }
         framesWritten += written / bytesPerSourceFrame();
@@ -289,6 +296,22 @@ final class UsbIsoSink implements PcmSink {
     @Override
     public int sampleRate() {
         return rate;
+    }
+
+    /** True only while the same enumerated device this sink was opened on is
+     *  still present. A swapped/replugged DAC must never inherit the old fd and
+     *  claim: the reused sink would keep reporting the previous DAC's UAC
+     *  version and feed a dead endpoint while the decoder ran at full speed. */
+    boolean matchesCurrentDevice() {
+        if (!opened) return false;
+        UsbDevice now = AndroidUsbAudio.findAudioDevice(appContext);
+        return device != null && now != null
+                && device.getDeviceName().equals(now.getDeviceName());
+    }
+
+    /** Audio class of the open stream: 1, 2, or 0 when nothing is open. */
+    int uacVersion() {
+        return opened ? UacOutput.uacVersion() : 0;
     }
 
     @Override

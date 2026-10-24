@@ -623,6 +623,9 @@ public final class PlayerController {
      *  control), "software" (a digital gain), or "" when unknown. The volume
      *  readout labels itself with this. */
     public final Property<String> hifiVolumeKind = new Property<>("");
+    /** Audio class of the exclusive USB stream, "UAC 1.0" or "UAC 2.0"; "" while
+     *  no exclusive stream is open (framework route, or no USB DAC). */
+    public final Property<String> hifiUacVersion = new Property<>("");
     /** Routes the picker offers, automatic first. */
     public final Property<List<AudioOutputDevice>> hifiDevices =
             new Property<>(Collections.<AudioOutputDevice>emptyList());
@@ -6096,6 +6099,7 @@ public final class PlayerController {
                 hifiExclusiveState.set(AudioOutputStatus.EXCLUSIVE_NONE);
                 hifiFallbackReason.set("");
                 hifiVolumeKind.set("");
+                hifiUacVersion.set("");
             });
             return;
         }
@@ -6103,10 +6107,12 @@ public final class PlayerController {
             final List<AudioOutputDevice> devices;
             final AudioOutputStatus status;
             final HifiCapabilities capabilities;
+            final int uacVersion;
             try {
                 devices = hifi.outputDevices();
                 status = hifi.outputStatus();
                 capabilities = hifi.capabilities();
+                uacVersion = hifi.uacVersion();
             } catch (Throwable e) {
                 // A device that went away mid-query must not take playback (or the
                 // settings page) down with it — report "unsupported" and move on.
@@ -6118,13 +6124,13 @@ public final class PlayerController {
                 });
                 return;
             }
-            post(() -> applyHifiStatus(devices, status, capabilities));
+            post(() -> applyHifiStatus(devices, status, capabilities, uacVersion));
         });
     }
 
     /** Render-thread sink for {@link #refreshHifiStatus()}. */
     private void applyHifiStatus(List<AudioOutputDevice> devices, AudioOutputStatus status,
-                                 HifiCapabilities capabilities) {
+                                 HifiCapabilities capabilities, int uacVersion) {
         // "Supported" here means the host offers the feature at all; what it can
         // actually do on this device is the capability bits below.
         hifiSupported.set(true);
@@ -6142,6 +6148,7 @@ public final class PlayerController {
             hifiExclusiveState.set(AudioOutputStatus.EXCLUSIVE_NONE);
             hifiFallbackReason.set("");
             hifiVolumeKind.set("");
+            hifiUacVersion.set("");
             return;
         }
         hifiDeviceName.set(status.deviceName);
@@ -6160,6 +6167,8 @@ public final class PlayerController {
         hifiExclusiveState.set(status.exclusiveState);
         hifiFallbackReason.set(status.fallbackReason);
         hifiVolumeKind.set(status.volumeKind);
+        hifiUacVersion.set(uacVersion == 2 ? "UAC 2.0"
+                : uacVersion == 1 ? "UAC 1.0" : "");
     }
 
     /** "FLAC 24bit/96kHz" / "48kHz/16bit" — the two "unknown" cases collapse

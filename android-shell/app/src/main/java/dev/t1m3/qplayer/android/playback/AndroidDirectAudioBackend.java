@@ -648,6 +648,11 @@ final class AndroidDirectAudioBackend implements AudioBackend {
                 : AudioOutputStatus.EXCLUSIVE_NONE;
     }
 
+    /** Audio class of the open USB stream: 1, 2, or 0 when none is open. */
+    int uacVersion() {
+        return sink instanceof UsbIsoSink ? ((UsbIsoSink) sink).uacVersion() : 0;
+    }
+
     /** Why the output is not what the mode asked for, for the chain card: "" when
      *  it is. Failures that kept the source from starting are reported through
      *  the dispatcher's fallback reason instead, which is the more specific
@@ -1093,8 +1098,11 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         // The sink stays open across sources: when the last source left it open
         // at the very format this one needs, keep it — re-opening would re-claim
         // the DAC from usbfs (the audible gap between tracks) and throw away the
-        // buffered audio that bridges a mid-track cache-file switch.
-        if (sink.isOpen()
+        // buffered audio that bridges a mid-track cache-file switch. It must be
+        // the SAME DAC, though: a swapped device cannot inherit the old claim/fd.
+        boolean sameDevice = !(sink instanceof UsbIsoSink)
+                || ((UsbIsoSink) sink).matchesCurrentDevice();
+        if (sink.isOpen() && sameDevice
                 && sink.sampleRate() == decodedRate
                 && sink.channels() == channels
                 && sink.floatPcm() == floatPcm) {
@@ -1118,9 +1126,9 @@ final class AndroidDirectAudioBackend implements AudioBackend {
             return true;
         }
         if (sink.isOpen()) {
-            Logger.info("direct sink rebuild: {}Hz/ch{} -> {}Hz/ch{}",
-                    sink.sampleRate(), sink.channels(), decodedRate, channels);
-            sink.close();   // format change: rebuild for the new one
+            Logger.info("direct sink rebuild: {}Hz/ch{} -> {}Hz/ch{} (dacChanged={})",
+                    sink.sampleRate(), sink.channels(), decodedRate, channels, !sameDevice);
+            sink.close();   // format change or a different DAC: rebuild for it
         }
         if (!sink.open(decodedRate, channels, floatPcm, -1)) return false;
         synchronized (lock) {

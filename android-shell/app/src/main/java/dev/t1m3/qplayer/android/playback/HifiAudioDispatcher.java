@@ -661,6 +661,18 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
                 && AudioOutputStatus.EXCLUSIVE_FULL.equals(backend.exclusiveState());
     }
 
+    /** The USB audio class in use, 1 or 2; 0 while no exclusive stream owns the
+     *  output (framework fallback, paused/closed sink, no USB DAC). */
+    @Override
+    public int uacVersion() {
+        AndroidDirectAudioBackend backend = direct;
+        if (backend == null) return 0;
+        synchronized (lock) {
+            if (active != backend) return 0;
+        }
+        return backend.uacVersion();
+    }
+
     @Override
     public void setFollowSampleRate(boolean on) {
         followSampleRate = on;

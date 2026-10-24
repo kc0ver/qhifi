@@ -420,6 +420,25 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 12
+                        visible: player.hifiUacVersion !== ""
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.t("settings.hifiChain.uac.title")
+                            color: Theme.color.onSurfaceVariantColor
+                            font.family: Theme.typography.bodySmall.family
+                            font.pixelSize: 14
+                        }
+                        Text {
+                            text: player.hifiUacVersion
+                            color: Theme.color.onSurfaceColor
+                            font.family: Theme.typography.bodySmall.family
+                            font.pixelSize: 14
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
                         Text {
                             Layout.fillWidth: true
                             text: i18n.t("settings.hifiChain.format.title")

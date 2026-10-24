@@ -76,6 +76,13 @@ public interface HifiOutputControl {
         return "";
     }
 
+    /** Audio class of the USB stream that is open right now: 1 (UAC1), 2 (UAC2),
+     *  or 0 when no exclusive stream is up. Default 0 so hosts without a USB
+     *  driver (desktop, test doubles) need no change. */
+    default int uacVersion() {
+        return 0;
+    }
+
     /** Which end the app's volume slider drives on an exclusive stream:
      *  0 = hardware (the DAC's own control, samples locked at full scale),
      *  1 = software (the DAC held at max, digital attenuation). A no-op where

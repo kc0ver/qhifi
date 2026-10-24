@@ -113,6 +113,7 @@ bool readConfigDescriptor(int fd, std::vector<uint8_t>* out) {
 }
 
 bool parseConfigDescriptor(const std::vector<uint8_t>& config, DeviceInfo* info) {
+    *info = DeviceInfo();
     AltSetting current;
     bool inAlt = false;
     int interfaceClass = 0;
@@ -223,13 +224,18 @@ bool parseConfigDescriptor(const std::vector<uint8_t>& config, DeviceInfo* info)
                             current.bitResolution = config[pos + 5];
                         } else {
                             // UAC1 type I: bFormatType(3) bNrChannels(4)
-                            // bSubframeSize(5) bBitResolution(6) tSamFreq(7..).
+                            // bSubframeSize(5) bBitResolution(6) bSamFreqType(7)
+                            // tSamFreq(8..). bSamFreqType is the COUNT of discrete
+                            // rates (0 means a min/max pair instead). Reading the
+                            // rates one byte early folds the count into every entry
+                            // — 44100 becomes 11289603 and no alt ever matches.
                             current.channels = config[pos + 4];
                             current.subslotSize = config[pos + 5];
                             current.bitResolution = config[pos + 6];
-                            int freqs = (length - 7) / 3;
+                            int freqs = length > 7 ? config[pos + 7] : 0;
                             for (int i = 0; i < freqs; i++) {
-                                size_t at = pos + 7 + (size_t) i * 3;
+                                size_t at = pos + 8 + (size_t) i * 3;
+                                if (at + 3 > pos + length) break;
                                 uint32_t rate = config[at]
                                         | (config[at + 1] << 8)
                                         | (config[at + 2] << 16);
@@ -328,6 +334,8 @@ public:
     bool exclusive() const { return opened_; }
     int sampleRate() const { return opened_ ? rate_ : 0; }
     int channels() const { return opened_ ? channels_ : 0; }
+    /** 1 = UAC1, 2 = UAC2, 0 = no stream open (nothing to report). */
+    int uacVersion() const { return opened_ ? (uac2_ ? 2 : 1) : 0; }
     int bitDepth() const { return opened_ ? bitResolution_ : 0; }
     bool floatPcm() const { return opened_ && floatPcm_; }
     bool hasHardwareVolume() const { return opened_ && info_.volumeKnown; }
@@ -360,6 +368,11 @@ private:
     int fd_ = -1;
     bool opened_ = false;
     bool streaming_ = false;
+    // A URB the kernel refuses means the device/fd is gone. The feeder would
+    // otherwise keep draining the ring through failed submissions, so write()
+    // never blocks and the decoder races to the end of the track in silence.
+    // Once this is set, write() returns -1 so Java can fail over instead.
+    bool wireFailed_ = false;
     DeviceInfo info_;
     AltSetting alt_;
     bool uac2_ = false;
@@ -391,6 +404,12 @@ private:
     bool payloadLive_ = false;
     int64_t payloadConstantSinceMs_ = -1;
     int64_t payloadStuckSinceMs_ = -1;
+    // Peak absolute sample actually placed on the wire since the last beat, and
+    // host-controller completion errors. Nonzero samples that never exceed a few
+    // LSB are inaudible even though the payload audit calls them "live".
+    int64_t peakAbs_ = 0;
+    int64_t urbStatusErrors_ = 0;
+    int64_t packetStatusErrors_ = 0;
 
     std::vector<IsoUrb> urbs_;
     std::vector<FeedbackUrb> feedbackUrbs_;
@@ -414,6 +433,7 @@ bool UacStream::open(int fd, int requestedRate, int channels, bool floatPcm,
                      int preferDepth) {
     teardown();
     fd_ = fd;
+    wireFailed_ = false;
     if (fd < 0) { setError("err:fd"); return false; }
     if (requestedRate <= 0) { setError("err:rate"); return false; }
 
@@ -427,29 +447,85 @@ bool UacStream::open(int fd, int requestedRate, int channels, bool floatPcm,
     LOGI("parsed uac%d: %zu alt(s), ac iface=%d clock=%d",
          uac2_ ? 2 : 1, info_.alts.size(), info_.acInterface, info_.clockId);
     for (const AltSetting& alt : info_.alts) {
-        LOGI("  alt iface=%d alt=%d ch=%d subslot=%d bits=%d ep=%02x maxpkt=%d",
+        std::string rates;
+        for (uint32_t r : alt.rates) {
+            if (!rates.empty()) rates += ",";
+            rates += std::to_string(r);
+        }
+        LOGI("  alt iface=%d alt=%d ch=%d subslot=%d bits=%d ep=%02x maxpkt=%d rates=[%s]",
              alt.interfaceNumber, alt.alt, alt.channels, alt.subslotSize,
-             alt.bitResolution, alt.epAddress, alt.epMaxPacket);
+             alt.bitResolution, alt.epAddress, alt.epMaxPacket, rates.c_str());
     }
 
-    if (!claimInterfaces()) return false;  // claimInterfaces sets the token
-    if (!chooseAlt(channels, preferDepth, requestedRate)) return false;
+    auto applyAlt = [&]() -> bool {
+        usbdevfs_setinterface set;
+        memset(&set, 0, sizeof(set));
+        set.interface = (unsigned int) alt_.interfaceNumber;
+        set.altsetting = alt_.alt;
+        if (ioctl(fd_, USBDEVFS_SETINTERFACE, &set) != 0) {
+            LOGW("set interface %d alt %d failed: %s",
+                 alt_.interfaceNumber, alt_.alt, strerror(errno));
+            setError("err:alt");
+            return false;
+        }
+        return true;
+    };
 
-    if (!setSampleRate((uint32_t) requestedRate)) { setError("err:rate"); return false; }
-
-    // An exclusive stream has no software gain, so the only way the app's volume
-    // can reach the listener is through the DAC's own control.
-    queryVolumeRange();
-
-    usbdevfs_setinterface set;
-    memset(&set, 0, sizeof(set));
-    set.interface = (unsigned int) alt_.interfaceNumber;
-    set.altsetting = alt_.alt;
-    if (ioctl(fd_, USBDEVFS_SETINTERFACE, &set) != 0) {
-        LOGW("set interface %d alt %d failed: %s",
-             alt_.interfaceNumber, alt_.alt, strerror(errno));
-        setError("err:alt");
-        return false;
+    // The control sequence is dictated by the class, not by the DAC:
+    //
+    //   UAC2 — the rate is a Clock Source entity, valid independently of the
+    //   streaming alt, but the kernel's snd-usb-audio driver owns the interface
+    //   until we claim it and will not answer the clock's GET_RANGE meanwhile.
+    //   Claim → choose alt → program clock → probe volume → open alt.
+    //
+    //   UAC1 — the rate lives on the data endpoint and only exists while a
+    //   non-zero alt is active, while the supported rates are already in the
+    //   descriptor. Choose alt (no device traffic) → claim → open alt → program
+    //   rate. Choosing before claiming also means an unsupported rate never
+    //   detaches the system audio driver.
+    if (uac2_) {
+        if (!claimInterfaces()) return false;
+        if (!chooseAlt(channels, preferDepth, requestedRate)) return false;
+        if (!setSampleRate((uint32_t) requestedRate)) { setError("err:rate"); return false; }
+        queryVolumeRange();
+        if (!applyAlt()) return false;
+    } else {
+        if (!chooseAlt(channels, preferDepth, requestedRate)) return false;
+        if (!claimInterfaces()) return false;
+        if (!applyAlt()) return false;
+        if (!setSampleRate((uint32_t) requestedRate)) { setError("err:rate"); return false; }
+        // Read both back: a mismatch here means the device is running at a rate
+        // other than ours even though it ACKed the SET_CUR.
+        uint8_t altNow = 0xFF;
+        int na = usbControl(fd_, 0x81, 0x0A, 0, (uint16_t) alt_.interfaceNumber,
+                            1, &altNow, 500);   // GET_INTERFACE
+        uint8_t sr[3] = {0, 0, 0};
+        int ns = usbControl(fd_, 0xA2, 0x01, 0x0100, (uint16_t) alt_.epAddress,
+                            3, sr, 500);   // GET_CUR SAMPLING_FREQ_CONTROL
+        int readback = ns >= 3 ? (sr[0] | (sr[1] << 8) | (sr[2] << 16)) : -1;
+        LOGI("uac1 verify: GET_INTERFACE alt=%d (n=%d), device rate=%d (n=%d, want %d)",
+             altNow, na, readback, ns, requestedRate);
+        queryVolumeRange();
+        if (info_.featureUnitId != 0 && !info_.volumeKnown) {
+            // Declared-but-unreadable volume: the class SET path is independent
+            // of GET, and this DAC arrives muted/attenuated from whatever host
+            // touched it last. Unmute the master and park it at a safe -20 dB;
+            // the app's software volume then rides on top.
+            uint16_t vIndex = ((uint16_t) info_.featureUnitId << 8)
+                    | (uint16_t) info_.acInterface;
+            uint8_t unmute = 0;
+            int nm = usbControl(fd_, 0x21, 0x01, (uint16_t) (0x01 << 8), vIndex, 1,
+                                &unmute, 500);   // SET_CUR MUTE, master
+            uint8_t minus20[2] = {0x00, 0xEC};  // -5120/256 = -20 dB
+            int n0 = usbControl(fd_, 0x21, 0x01, (uint16_t) (0x02 << 8), vIndex, 2,
+                                minus20, 500);
+            int n1 = usbControl(fd_, 0x21, 0x01, (uint16_t) ((0x02 << 8) | 1), vIndex, 2,
+                                minus20, 500);
+            int n2 = usbControl(fd_, 0x21, 0x01, (uint16_t) ((0x02 << 8) | 2), vIndex, 2,
+                                minus20, 500);
+            LOGI("uac1 volume kick: unmute=%d ch0=%d ch1=%d ch2=%d (want 1/2/2/2)",
+                 nm, n0, n1, n2);
+        }
     }
 
     rate_ = requestedRate;
@@ -560,9 +636,18 @@ bool UacStream::chooseAlt(int channels, int preferDepth, int requestedRate) {
     const AltSetting* best = nullptr;
     int bestScore = -1;
     for (const AltSetting& alt : info_.alts) {
-        if (alt.channels != channels) continue;
-        if (alt.subslotSize < 2 || alt.subslotSize > 4) continue;
-        if (alt.bitResolution < 16 || alt.bitResolution > 32) continue;
+        if (alt.channels != channels) {
+            LOGI("  skip alt=%d: channels %d != %d", alt.alt, alt.channels, channels);
+            continue;
+        }
+        if (alt.subslotSize < 2 || alt.subslotSize > 4) {
+            LOGI("  skip alt=%d: subslot=%d", alt.alt, alt.subslotSize);
+            continue;
+        }
+        if (alt.bitResolution < 16 || alt.bitResolution > 32) {
+            LOGI("  skip alt=%d: bits=%d", alt.alt, alt.bitResolution);
+            continue;
+        }
         if (uac2_) {
             if (!uac2RateSupported(fd_, info_, (uint32_t) requestedRate)) continue;
         } else {
@@ -570,7 +655,11 @@ bool UacStream::chooseAlt(int channels, int preferDepth, int requestedRate) {
             for (uint32_t r : alt.rates) {
                 if ((int) r == requestedRate) { listed = true; break; }
             }
-            if (!listed) continue;
+            if (!listed) {
+                LOGI("  skip alt=%d: rate %d not in %zu listed rates",
+                     alt.alt, requestedRate, alt.rates.size());
+                continue;
+            }
         }
         // Prefer the DAC depth matching the source; otherwise the smallest
         // depth that fits it (16-bit into 24/32 pads toward the top); finally
@@ -630,7 +719,7 @@ bool UacStream::setSampleRate(uint32_t rate) {
 // to full scale.
 bool UacStream::queryVolumeRange() {
     int unit = info_.volumeUnitId != 0 ? info_.volumeUnitId : info_.featureUnitId;
-    if (!uac2_ || unit == 0) {
+    if (unit == 0) {
         LOGI("no Feature Unit to hold a hardware volume control; the app volume will scale samples");
         return false;
     }
@@ -646,21 +735,57 @@ bool UacStream::queryVolumeRange() {
     for (int channel = 0; channel < 3; channel++) {
         uint8_t reply[16];
         memset(reply, 0, sizeof(reply));
-        int n = usbControl(fd_, 0xA1, 0x02, (uint16_t) ((0x02 << 8) | channel),
+        int n = 0;
+        if (uac2_) {
+            n = usbControl(fd_, 0xA1, 0x02, (uint16_t) ((0x02 << 8) | channel),
                            wIndex, sizeof(reply), reply, 500);   // GET_RANGE
-        if (n >= 8 && (reply[0] | (reply[1] << 8)) >= 1) {
-            int rlo = (int16_t) (reply[2] | (reply[3] << 8));
-            int rhi = (int16_t) (reply[4] | (reply[5] << 8));
-            if (rhi > rlo) {
-                mask |= 1 << channel;
-                if (primary < 0) {
-                    primary = channel;
-                    lo = rlo;
-                    hi = rhi;
-                    res = (int16_t) (reply[6] | (reply[7] << 8));
+            if (n >= 8 && (reply[0] | (reply[1] << 8)) >= 1) {
+                int rlo = (int16_t) (reply[2] | (reply[3] << 8));
+                int rhi = (int16_t) (reply[4] | (reply[5] << 8));
+                if (rhi > rlo) {
+                    mask |= 1 << channel;
+                    if (primary < 0) {
+                        primary = channel;
+                        lo = rlo;
+                        hi = rhi;
+                        res = (int16_t) (reply[6] | (reply[7] << 8));
+                    }
+                }
+            }
+        } else {
+            // UAC1 GET_RANGE is one 6-byte triple: wMIN, wMAX, wRES.
+            n = usbControl(fd_, 0xA1, 0x02, (uint16_t) ((0x02 << 8) | channel),
+                           wIndex, 6, reply, 500);
+            if (n >= 6) {
+                int rlo = (int16_t) (reply[0] | (reply[1] << 8));
+                int rhi = (int16_t) (reply[2] | (reply[3] << 8));
+                int rres = (int16_t) (reply[4] | (reply[5] << 8));
+                if (rhi > rlo) {
+                    mask |= 1 << channel;
+                    if (primary < 0) {
+                        primary = channel;
+                        lo = rlo;
+                        hi = rhi;
+                        res = rres;
+                    }
                 }
             }
         }
+        // Diagnostic: what the device says its own level/mute is right now.
+        // The stream has not started, so these answers are reliable.
+        uint8_t cur[2] = {0, 0};
+        uint8_t mute = 0xFF;
+        int nc = usbControl(fd_, 0xA1, 0x01, (uint16_t) ((0x02 << 8) | channel),
+                            wIndex, 2, cur, 200);   // GET_CUR volume
+        int nm = 0;
+        if (channel == 0) {
+            nm = usbControl(fd_, 0xA1, 0x01, (uint16_t) (0x01 << 8),
+                            wIndex, 1, &mute, 200);   // GET_CUR master mute
+        }
+        LOGI("  vol probe ch=%d rangeN=%d %s curN=%d raw=%d muteN=%d mute=%d",
+             channel, n, uac2_ ? "uac2" : "uac1",
+             nc, nc >= 2 ? (int16_t) (cur[0] | (cur[1] << 8)) : 0,
+             nm, nm >= 1 ? (int) mute : -1);
     }
     if (mask != 0) {
         info_.volumeMin = lo;
@@ -674,7 +799,7 @@ bool UacStream::queryVolumeRange() {
         for (int channel = 0; channel < 3; channel++) {
             uint8_t reply[2] = {0, 0};
             int n = usbControl(fd_, 0xA1, 0x01, (uint16_t) ((0x02 << 8) | channel),
-                               wIndex, 2, reply, 500);   // GET_CUR
+                               wIndex, 2, reply, 200);   // GET_CUR
             if (n >= 2) {
                 mask |= 1 << channel;
                 if (primary < 0) primary = channel;
@@ -906,6 +1031,7 @@ void UacStream::flush() {
 }
 
 int UacStream::write(const uint8_t* src, int bytes) {
+    if (wireFailed_) return -1;
     if (!opened_ || !streaming_) return 0;
     // Convert into the DAC's container on the way into the ring; a 16-bit
     // source on a 16-bit alt setting is a plain passthrough.
@@ -1088,6 +1214,38 @@ void UacStream::refillUrb(IsoUrb& urb) {
     inFlightBytes_ += fromRing;
     if (fromRing == 0 && totalBytes > 0) starvedUrbs_++;
 
+    // Peak of what is actually about to go on the wire, AFTER the software gain.
+    // payload="live" only says "not constant"; a gain of 1e-4 is also not
+    // constant and is completely inaudible. The peak separates the two.
+    {
+        int64_t peak = 0;
+        const uint8_t* d = urb.buffer.data();
+        size_t n = urb.buffer.size();
+        if (subslotSize_ == 2) {
+            for (size_t i = 0; i + 2 <= n; i += 2) {
+                int16_t v = 0;
+                memcpy(&v, d + i, 2);
+                int64_t a = v < 0 ? -(int64_t) v : (int64_t) v;
+                if (a > peak) peak = a;
+            }
+        } else if (subslotSize_ == 3) {
+            for (size_t i = 0; i + 3 <= n; i += 3) {
+                int32_t v = (int32_t) (d[i] | (d[i + 1] << 8) | (d[i + 2] << 16));
+                if (v & 0x800000) v -= 0x1000000;
+                int64_t a = v < 0 ? -(int64_t) v : (int64_t) v;
+                if (a > peak) peak = a;
+            }
+        } else if (subslotSize_ == 4) {
+            for (size_t i = 0; i + 4 <= n; i += 4) {
+                int32_t v = 0;
+                memcpy(&v, d + i, 4);
+                int64_t a = v < 0 ? -(int64_t) v : (int64_t) v;
+                if (a > peak) peak = a;
+            }
+        }
+        if (peak > peakAbs_) peakAbs_ = peak;
+    }
+
     // Payload audit (observer only). A buffer that is constant across its whole
     // span — all-zero silence padding, or a dead downstream stage — is the one
     // condition the device cannot distinguish from "music", so it is latched
@@ -1129,7 +1287,11 @@ void UacStream::refillUrb(IsoUrb& urb) {
         urb.submitted = false;
         inFlightBytes_ -= urb.dataBytes;
         urb.dataBytes = 0;
-        LOGW("iso submit failed: %s", strerror(errno));
+        if (!wireFailed_) {
+            wireFailed_ = true;
+            setError("err:usbLost");
+            LOGW("iso submit failed: %s (marking the wire dead)", strerror(errno));
+        }
     }
 }
 
@@ -1188,6 +1350,12 @@ int UacStream::reapUrb(int timeoutMs) {
             for (IsoUrb& iso : urbs_) {
                 if (urb_layout::urb(iso.block) == urb) {
                     iso.submitted = false;
+                    // Completion status was previously ignored: a controller that
+                    // rejects every packet still "reaps" at the expected rate.
+                    if (urb->status != 0) urbStatusErrors_++;
+                    for (int i = 0; i < urb->number_of_packets; i++) {
+                        if (urb->iso_frame_desc[i].status != 0) packetStatusErrors_++;
+                    }
                     inFlightBytes_ -= std::min(inFlightBytes_, iso.dataBytes);
                     iso.dataBytes = 0;
                     break;
@@ -1215,6 +1383,8 @@ void UacStream::feedLoop() {
     int64_t lastWritten = 0;
     int64_t lastStarved = 0;
     int64_t lastFlushes = 0;
+    int64_t lastUrbErrors = 0;
+    int64_t lastPacketErrors = 0;
     while (running_) {
         {
             std::unique_lock<std::mutex> guard(mutex_);
@@ -1247,17 +1417,24 @@ void UacStream::feedLoop() {
                 int64_t writtenDelta = totalWrittenBytes_ - lastWritten;
                 int64_t starvedDelta = starvedUrbs_ - lastStarved;
                 int64_t flushDelta = flushCount_ - lastFlushes;
+                int64_t urbErrDelta = urbStatusErrors_ - lastUrbErrors;
+                int64_t pktErrDelta = packetStatusErrors_ - lastPacketErrors;
+                int64_t peak = peakAbs_;
                 lastWritten = totalWrittenBytes_;
                 lastStarved = starvedUrbs_;
                 lastFlushes = flushCount_;
+                lastUrbErrors = urbStatusErrors_;
+                lastPacketErrors = packetStatusErrors_;
+                peakAbs_ = 0;
                 LOGI("beat: wrote=%lldB/2s ring=%lld/%zu inflight=%lldB urbs=%d"
                      " reaps=%lld starved=%lld flushes=%lld flushedTotal=%lldB"
-                     " payload=%s fbRate=%lld",
+                     " payload=%s peak=%lld errs=%lld/%lld fbRate=%lld",
                      (long long) writtenDelta, (long long) ringBytes_, ring_.size(),
                      (long long) inFlightBytes_, inFlight, (long long) beatReaps,
                      (long long) starvedDelta, (long long) flushDelta,
                      (long long) flushedBytes_,
-                     payloadLive_ ? "live" : "stuck",
+                     payloadLive_ ? "live" : "stuck", (long long) peak,
+                     (long long) urbErrDelta, (long long) pktErrDelta,
                      (long long) feedbackRate_);
             }
             // (The DAC's own volume is deliberately NOT read back here. This
@@ -1369,6 +1546,11 @@ Java_dev_t1m3_qplayer_android_playback_UacOutput_framesQueued(JNIEnv*, jclass) {
 JNIEXPORT jboolean JNICALL
 Java_dev_t1m3_qplayer_android_playback_UacOutput_exclusive(JNIEnv*, jclass) {
     return gStream.exclusive() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_t1m3_qplayer_android_playback_UacOutput_uacVersion(JNIEnv*, jclass) {
+    return gStream.uacVersion();
 }
 
 JNIEXPORT jint JNICALL

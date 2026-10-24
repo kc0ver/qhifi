@@ -74,6 +74,9 @@ final class UacOutput {
 
     static native int sampleRate();
 
+    /** Audio class of the open stream: 1, 2, or 0 when nothing is open. */
+    static native int uacVersion();
+
     static native int channels();
 
     static native int bitDepth();
