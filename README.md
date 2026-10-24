@@ -1,8 +1,8 @@
-<!----
+
 <p align="center">
   <img src="shared-qml/app-icon.png" width="96" alt="QHIFI">
 </p>
----->
+
 <h1 align="center">QHIFI</h1>
 
 <p align="center">
