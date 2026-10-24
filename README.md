@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="shared-qml/app-icon.png?v=20261024" width="96" alt="QHIFI">
+  <img src="https://raw.githubusercontent.com/kc0ver/qhifi/master/shared-qml/app-icon.png?v=20261024" width="96" alt="QHIFI">
 </p>
 
 <h1 align="center">QHIFI</h1>
