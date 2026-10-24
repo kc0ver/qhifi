@@ -126,5 +126,15 @@ jobs:
           files: out/*
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
           # Curated notes live beside the workflow; update them before each release.
-          body_path: .github/release-notes.md
+          body_path: ${{ github.workspace }}/.github/release-notes.md
+
+      # Reusing an existing release (e.g. re-tagging the same version) can leave
+      # the old body in place even with body_path set; write the curated notes
+      # once more after the upload so the published body always matches the tag.
+      - name: Sync release notes
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: gh release edit "$TAG" --notes-file .github/release-notes.md
 
