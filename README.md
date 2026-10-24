@@ -1,7 +1,8 @@
+<!----
 <p align="center">
   <img src="shared-qml/app-icon.png" width="96" alt="QHIFI">
 </p>
-
+---->
 <h1 align="center">QHIFI</h1>
 
 <p align="center">
@@ -354,6 +355,9 @@ cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebu
   “未在放音”；可尝试关闭电池优化或开启后台保活音轨。
 
 ## 常见问题
+
+**为什么我的 DAC 不出声或声音不正常？**
+现阶段 QHIFI 仅在水月雨破晓2上进行过测试，不保证支持所有设备。
 
 **为什么独占模式下系统音量键没有反应？**
 独占流不经过系统混音，音量由应用接管。请使用应用内的音量 HUD 或音量控件。
