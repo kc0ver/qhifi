@@ -417,7 +417,7 @@ public final class PlaybackService extends Service {
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(t != null ? nz(t.title) : "QPlayer")
+                .setContentTitle(t != null ? nz(t.title) : "QHIFI")
                 .setContentText(t != null ? nz(t.artist) : "")
                 .setContentIntent(contentPi)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)

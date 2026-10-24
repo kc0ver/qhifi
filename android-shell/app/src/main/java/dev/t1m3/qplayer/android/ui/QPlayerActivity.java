@@ -712,9 +712,11 @@ public final class QPlayerActivity extends Activity {
         box.setBackgroundColor(0xFF1A1F26);
 
         android.widget.TextView title = new android.widget.TextView(this);
-        title.setText("qplayer");
+        title.setText("QHIFI");
         title.setTextColor(0xFFE6E1E5);
         title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 34);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        title.setLetterSpacing(0.06f);
         title.setGravity(android.view.Gravity.CENTER);
         box.addView(title);
 
