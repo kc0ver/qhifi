@@ -228,9 +228,22 @@ mvn -B -pl player-core -am install -DskipTests
 cd android-shell
 ./gradlew :app:assembleDebug
 # Windows: .\gradlew.bat :app:assembleDebug
+
+# 性能排查使用独立的 perf 包（复用 release 构建配置）
+./gradlew :app:assemblePerf
+# Windows: .\gradlew.bat :app:assemblePerf
 ```
 
-产物：`android-shell/app/build/outputs/apk/debug/app-debug.apk`。
+debug 产物：`android-shell/app/build/outputs/apk/debug/app-debug.apk`；perf 产物：
+`android-shell/app/build/outputs/apk/perf/app-perf.apk`。
+
+只有 `perf` 变体允许 shell 性能采集，正式发布包不因此开启 profiling。首次安装或更新后，等待
+`qplayer.lifecycle` 输出 `ready activity=...`，确认权限和插件提示已关闭，再比较相同页面与
+滚动操作，避免把 QML 编译或弹窗当成滚动耗时。
+
+Android 测试包使用独立沙箱：从正式版复制本地库缓存时，必须先把索引中的封面路径重定位到
+测试包目录，再以测试包 UID 写入对应缓存文件；直接沿用 `/data/user/0/<正式包名>/…` 会因
+权限隔离而无法显示封面。
 
 ### Android Release
 
