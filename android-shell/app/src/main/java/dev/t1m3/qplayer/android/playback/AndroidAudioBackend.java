@@ -83,6 +83,10 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private String probedEncoding = "";
     private int probedSampleRate;
     private int probedBitDepth;
+    /** Headers the last {@link #play} was given. A network stream can only be
+     *  re-read for the format readout with the credentials the player itself
+     *  uses; without them a CDN refuses the second request. */
+    private volatile Map<String, String> sourceHeaders = Collections.emptyMap();
 
     public AndroidAudioBackend(Context ctx) {
         appContext = ctx.getApplicationContext();
@@ -104,6 +108,7 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         if (src == null || src.isEmpty()) return;
         releasePlayer();
         source = src;
+        sourceHeaders = headers != null ? headers : Collections.<String, String>emptyMap();
         pendingSeekMs = Math.max(0L, startMs);
         wantPlay = true;
         prepared = false;
@@ -448,11 +453,25 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         return source;
     }
 
+    @Override
+    public boolean sourceFormatPending() {
+        String src = currentSource();
+        if (src == null || src.isEmpty()) return false;
+        if (!src.startsWith("http://") && !src.startsWith("https://")) return false;
+        synchronized (probeLock) {
+            // A cached source has already been read (or deliberately skipped): only
+            // the one {@link #outputStatus()} is about to read is pending.
+            return !src.equals(probedSource);
+        }
+    }
+
     /**
-     * Read the current source's own format, cached per source. Only local files
-     * and {@code content://} uris are read: probing an {@code http(s)} stream
-     * would mean a second network connection for what is only a readout, and the
-     * source format of a stream we did not open is genuinely unknown.
+     * Read the current source's own format, cached per source. A local file or a
+     * {@code content://} uri is read straight from the file. An {@code http(s)}
+     * stream is read with exactly the request the player itself made — the same
+     * headers when the provider handed any (a CDN that checks them refuses a bare
+     * one), and bare when it did not (the unblock fallback returns plain urls).
+     * A stream the host refuses stays unknown and the row says so.
      */
     private void probeSourceFormat(String src) {
         synchronized (probeLock) {
@@ -468,12 +487,21 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
             probedEncoding = "";
             probedSampleRate = 0;
             probedBitDepth = 0;
-            if (src.startsWith("http://") || src.startsWith("https://")) return;
+            boolean network = src.startsWith("http://") || src.startsWith("https://");
+            Map<String, String> headers = sourceHeaders;
+            Logger.info("hifi source probe: network={} headers={} src={}",
+                    network, headers == null ? 0 : headers.size(), shorten(src));
             MediaMetadataRetriever retriever = new MediaMetadataRetriever();
             try {
                 if (src.startsWith("content://")) {
                     retriever.setDataSource(appContext, Uri.parse(src));
+                } else if (network && headers != null && !headers.isEmpty()) {
+                    // The same request the player made, headers included: a CDN that
+                    // needs the credentials refuses a bare one.
+                    retriever.setDataSource(src, headers);
                 } else {
+                    // A plain url (the unblock fallback hands out bare ones) is read
+                    // the same way the player read it — without headers.
                     retriever.setDataSource(src);
                 }
                 probedEncoding = AndroidHifiProbe.encodingLabel(
@@ -486,6 +514,8 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
                     probedBitDepth = AndroidHifiProbe.intMetadata(retriever,
                             MediaMetadataRetriever.METADATA_KEY_BITS_PER_SAMPLE);
                 }
+                Logger.info("hifi source probe done: enc={} rate={} depth={}",
+                        probedEncoding, probedSampleRate, probedBitDepth);
             } catch (Throwable e) {
                 Logger.warn("hifi source probe failed: {}", e.toString());
             } finally {
@@ -495,6 +525,15 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
                 }
             }
         }
+    }
+
+    /** A source URL is long and carries its credentials in the query string; the
+     *  log only needs enough of it to tell two sources apart. */
+    private static String shorten(String src) {
+        if (src == null) return "";
+        int query = src.indexOf('?');
+        String bare = query > 0 ? src.substring(0, query) : src;
+        return bare.length() > 90 ? bare.substring(0, 90) + "…" : bare;
     }
 
     // --- Audio focus ------------------------------------------------------

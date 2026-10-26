@@ -26,17 +26,27 @@ Item {
     // the host-drawn column move on exactly the same value.
     property real fullWidthK: player.lyricFullWidth
     property bool offsetPanelOpen: false
-    // Top row inset for the three title buttons. Desktop overrides this to 6
+    // Playback-info card (AudioChainDialog.qml): the second local panel, same top
+    // corner family as the offset panel and mutually exclusive with it.
+    property bool chainPanelOpen: false
+    // Top row inset for the four title buttons. Desktop overrides this to 6
     // (Main.qml hides the custom title bar while the lyric page is open, so the
     // buttons sit flush at the very top of the window); mobile keeps the status
     // bar inset so they clear the system bar.
     property real topPad: settings.topInset + 6
     onOffsetPanelOpenChanged: {
-        player.setLyricOffsetPanelOpen(offsetPanelOpen)
+        player.setLyricOffsetPanelOpen(offsetPanelOpen || chainPanelOpen)
+        // Both panels drop into the same corner: opening one takes the other down
+        // instead of stacking two cards on top of each other.
+        if (offsetPanelOpen) chainPanelOpen = false
         // Synchronize once on entry. Do not feed every player property change back
         // into Slider.value while its MouseArea is dragging: that re-entrant write
         // interrupts qml4j's active gesture as soon as the thumb moves one step.
         if (offsetPanelOpen) offsetSlider.value = player.lyricOffsetMs
+    }
+    onChainPanelOpenChanged: {
+        player.setLyricOffsetPanelOpen(offsetPanelOpen || chainPanelOpen)
+        if (chainPanelOpen) offsetPanelOpen = false
     }
     // The page can also close via Esc / Android back, which bypasses this QML
     // entirely (PlayerController.pressBack), so mirror the other direction too. A
@@ -45,7 +55,12 @@ Item {
     // QObject target (a non-QObject target crashes with a ClassCastException at
     // Property.fireListeners on load).
     property bool lyricsOpenMirror: player.lyricsOpen
-    onLyricsOpenMirrorChanged: if (!lyricsOpenMirror) overlay.offsetPanelOpen = false
+    onLyricsOpenMirrorChanged: {
+        // Closing the page takes both local panels with it; the host flag they
+        // share is dropped by PlayerController.setLyricsOpen in the same pass.
+        if (!lyricsOpenMirror) overlay.offsetPanelOpen = false
+        if (!lyricsOpenMirror) overlay.chainPanelOpen = false
+    }
 
 
     function fmt(ms) {
@@ -138,9 +153,10 @@ Item {
     // Top-right, mirroring backBtn's top-left: the host-drawn lyric column claims its
     // own tap-to-seek/drag-to-scroll gesture over most of the body (LyricCompositor.
     // lyricsScrollable) BEFORE QML ever sees the pointer event, so this corner is
-    // explicitly carved out there (OFFSET_BTN_CORNER_*) to keep the button itself
-    // reliably clickable; the panel's own content is exempted while open via
-    // lyricOffsetPanelOpen (see onOffsetPanelOpenChanged above).
+    // explicitly carved out there (OFFSET_BTN_CORNER_*, now sized for all four
+    // buttons) to keep the button itself reliably clickable; the panels' own
+    // content is exempted while open via lyricOffsetPanelOpen (see the two
+    // on*PanelOpenChanged handlers above).
     IconButton {
         id: offsetBtn
         anchors.top: parent.top
@@ -155,15 +171,18 @@ Item {
 
     // Switch to cover view (issue #15: quick lyrics<->cover switching).
     // Hidden once already in cover view — tap the cover itself to come back. Same
-    // top row as offsetBtn, to its left — NOT stacked below (offsetPanel drops down
-    // from there and would overlap a button placed underneath).
+    // top row as offsetBtn, two slots to its left — NOT stacked below (offsetPanel
+    // drops down from there and would overlap a button placed underneath).
+    // Placed OUTSIDE the info button, not inside it: this one disappears on a
+    // track without lyrics, and an inner slot going empty would leave a hole
+    // between the two buttons that stay.
     IconButton {
         id: coverModeBtn
         objectName: "lyricCoverModeBtn"
         visible: !overlay.coverOnly
         anchors.top: parent.top
         anchors.topMargin: overlay.topPad
-        anchors.right: offsetBtn.left
+        anchors.right: chainBtn.left
         anchors.rightMargin: 6
         type: "standard"
         icon: "image"
@@ -193,6 +212,25 @@ Item {
         // No confirmation toast: the page rearranging itself IS the feedback, and
         // a snackbar for it would cover the progress bar it just moved down there.
         onClicked: settings.setValue("lyricFullWidth", !fullWidthBtn.wide)
+    }
+
+    // Playback info: where the track comes from, its own format, and what the HiFi
+    // output chain is doing right now. Sits directly left of the offset button, the
+    // innermost slot of the cluster, so the two buttons that are always there stay
+    // side by side; the view switches that come and go live further out. Drops the
+    // AudioChainDialog below. In landscape its slice of the top corner is carved
+    // out for QML by LyricCompositor's OFFSET_BTN_CORNER_* alongside the others.
+    IconButton {
+        id: chainBtn
+        objectName: "lyricChainBtn"
+        anchors.top: parent.top
+        anchors.topMargin: overlay.topPad
+        anchors.right: offsetBtn.left
+        anchors.rightMargin: 6
+        type: "standard"
+        icon: "info"
+        contentColor: "#FFFFFFFF"
+        onClicked: overlay.chainPanelOpen = !overlay.chainPanelOpen
     }
 
     MouseArea {
@@ -335,6 +373,17 @@ Item {
                 player.resetLyricOffset()
             }
         }
+    }
+
+    // Playback info card, toggled from the info button in the top row. Its open
+    // state also puts the host's lyric column out of the way: the flag it writes
+    // above (setLyricOffsetPanelOpen) skips the host's tap-to-seek / drag-to-scroll
+    // recognition, so the scrim and the close button here get the pointer events.
+    AudioChainDialog {
+        objectName: "lyricChainDialog"
+        anchors.fill: parent
+        opened: overlay.chainPanelOpen
+        onCloseRequested: overlay.chainPanelOpen = false
     }
 
     MarqueeText {

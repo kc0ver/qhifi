@@ -23,6 +23,14 @@ public interface HifiOutputControl {
     /** Snapshot of the current chain; called off the render thread. */
     AudioOutputStatus outputStatus();
 
+    /** Live answer to "is the source's own format still being read?" — the read is
+     *  part of {@link #outputStatus()}, so without this the chain readout would sit
+     *  on "not known" for however long a network stream's header takes. Default
+     *  false for hosts whose readout never has to wait (desktop, test doubles). */
+    default boolean sourceFormatPending() {
+        return false;
+    }
+
     /** What this device can do, whatever mode the user picked; called off the
      *  render thread. Carries the capability bits the chain card shows, so a mode
      *  that cannot work here says so instead of silently doing nothing. */

@@ -15,6 +15,8 @@ import org.junit.rules.TemporaryFolder;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -123,6 +125,40 @@ public class PlayerControllerHifiTest {
             controller.refreshHifiDevices();
             awaitHifi(underTest, () -> !underTest.hifiDeviceName.peek().isEmpty());
             assertEquals(2, controller.hifiDevices.peek().size());
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /** Reading a stream's own header is part of the chain query, so the readout has
+     *  to say "reading" while that read is in flight — and drop that the moment the
+     *  answer lands, whatever the answer was. */
+    @Test
+    public void sourceFormatReadIsFlaggedWhileItRuns() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("hifi-probe").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            ProbeBackend backend = new ProbeBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            final PlayerController underTest = controller;
+
+            controller.refreshHifiStatus();
+            // The worker is inside outputStatus() (the read) right now: the flag has
+            // to be up already, not only once the query returned.
+            awaitHifi(underTest, () -> underTest.hifiSourceFormatPending.peek());
+            assertTrue(controller.hifiSourceFormatPending.peek());
+            assertEquals("", controller.hifiSourceFormat.peek());
+
+            backend.releaseRead.countDown();
+            awaitHifi(underTest, () -> !underTest.hifiSourceFormatPending.peek());
+            assertFalse(controller.hifiSourceFormatPending.peek());
+            assertEquals("FLAC 96kHz", controller.hifiSourceFormat.peek());
         } finally {
             if (controller != null) controller.shutdown();
             AppDirs.setBase(oldBase);
@@ -304,5 +340,41 @@ public class PlayerControllerHifiTest {
         @Override public void setHifiEnabled(boolean on) { hifiEnabled = on; }
         @Override public void setFollowSampleRate(boolean on) { followSampleRate = on; }
         @Override public void selectOutputDevice(String deviceId) { selectedDeviceId = deviceId; }
+    }
+
+    /** A backend whose chain query waits — the way a real one waits on a network
+     *  header read — so the test can look at the readout mid-read, and whose source
+     *  format only exists once that read returns. */
+    private static final class ProbeBackend extends FakeAudioBackend implements HifiOutputControl {
+        final CountDownLatch releaseRead = new CountDownLatch(1);
+
+        @Override public boolean sourceFormatPending() { return true; }
+
+        @Override public List<AudioOutputDevice> outputDevices() {
+            return Arrays.asList(new AudioOutputDevice("", "自动（系统默认）",
+                    AudioOutputDevice.ROUTE_USB, true));
+        }
+
+        @Override public AudioOutputStatus outputStatus() {
+            try {
+                releaseRead.await(5L, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            // A stream's codec and rate without a bit depth, which is what a network
+            // source reads back as.
+            return new AudioOutputStatus("", "自动（系统默认）", AudioOutputDevice.ROUTE_USB,
+                    "FLAC", 96000, 0, "PCM", 48000, 16, true, false, false, "",
+                    HifiOutputMode.SYSTEM, HifiOutputMode.SYSTEM,
+                    AudioOutputStatus.EXCLUSIVE_NONE, "");
+        }
+
+        @Override public HifiCapabilities capabilities() {
+            return new HifiCapabilities(false, false, false, 0, "");
+        }
+
+        @Override public void setHifiEnabled(boolean on) { }
+        @Override public void setFollowSampleRate(boolean on) { }
+        @Override public void selectOutputDevice(String deviceId) { }
     }
 }

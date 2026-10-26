@@ -605,6 +605,17 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     }
 
     @Override
+    public boolean sourceFormatPending() {
+        AndroidDirectAudioBackend directBackend = direct;
+        if (active == directBackend && directBackend != null) {
+            // The exclusive path reads the source's format while it opens the
+            // stream, so there is never a separate read to report.
+            return false;
+        }
+        return system.sourceFormatPending();
+    }
+
+    @Override
     public AudioOutputStatus outputStatus() {
         AndroidDirectAudioBackend directBackend = direct;
         AudioOutputStatus base = (active == directBackend && directBackend != null)

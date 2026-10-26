@@ -89,9 +89,10 @@ public final class LyricCompositor {
     // which clips the bottom of that row. Without this the buttons' own pointer-down
     // is intermittently swallowed by the tap-to-seek/drag-to-scroll gesture below
     // instead of reaching the real QML controls. Grown with the row: 56 for one
-    // button, 108 once the cover-mode button joined it, now 154 for three
-    // (3 x 40px + two 6px gaps + the 6px margin, plus slack).
-    private static final float OFFSET_BTN_CORNER_W = 154f;
+    // button, 108 once the cover-mode button joined it, 154 for three, now 200 for
+    // four (4 x 40px + three 6px gaps + the 6px margin, plus slack) — the playback
+    // info button (LyricOverlay.qml's chainBtn) is the fourth.
+    private static final float OFFSET_BTN_CORNER_W = 200f;
     private static final float OFFSET_BTN_CORNER_H = 52f;
     // The same carve-out on the other side, for the close button. Only needed in
     // the full-width layout: everywhere else the scrollable band starts at the

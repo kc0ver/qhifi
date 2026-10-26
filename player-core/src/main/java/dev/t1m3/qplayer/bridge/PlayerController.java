@@ -557,10 +557,11 @@ public final class PlayerController {
     /** Independent, session-only visualizer page; never restored from settings. */
     public final Property<Boolean> temperaOpen = new Property<>(false);
     public final Property<Double> temperaOpacity = new Property<>(0.0);
-    /** Whether the lyric page's QML offset-adjust panel is open. The host-drawn lyric
-     *  column has no QML underneath it, so its own tap = seek / drag = scroll gesture
-     *  is normally recognized before any QML dispatch; while this is true the input
-     *  layer skips that recognition so taps land on the panel's QML controls instead. */
+    /** Whether a QML panel of the lyric page is open — the offset-adjust panel or the
+     *  playback-info card. The host-drawn lyric column has no QML underneath it, so its
+     *  own tap = seek / drag = scroll gesture is normally recognized before any QML
+     *  dispatch; while this is true the input layer skips that recognition so taps land
+     *  on the panel's QML controls instead. */
     public final Property<Boolean> lyricOffsetPanelOpen = new Property<>(false);
     /** Timing correction for the current song only, in milliseconds. */
     public final Property<Integer> lyricOffsetMs = new Property<>(0);
@@ -616,6 +617,10 @@ public final class PlayerController {
     /** Source format for the chain card, e.g. "FLAC 24bit/96kHz"; "" when the
      *  source's header hasn't been inspected (network streams). */
     public final Property<String> hifiSourceFormat = new Property<>("");
+    /** True while that header is still being read — a network stream's is fetched
+     *  over the network as part of the chain query, so the readout shows "reading"
+     *  rather than "not known" for the moment it takes. */
+    public final Property<Boolean> hifiSourceFormatPending = new Property<>(false);
     /** Negotiated output format, e.g. "48kHz/16bit". */
     public final Property<String> hifiOutputFormat = new Property<>("");
     public final Property<Boolean> hifiResampled = new Property<>(false);
@@ -6447,6 +6452,7 @@ public final class PlayerController {
                 hifiDeviceName.set("");
                 hifiRouteType.set(AudioOutputDevice.ROUTE_BUILTIN);
                 hifiSourceFormat.set("");
+                hifiSourceFormatPending.set(false);
                 hifiOutputFormat.set("");
                 hifiResampled.set(false);
                 hifiReason.set(I18n.tr("settings.hifiChain.reason.unsupported"));
@@ -6468,6 +6474,12 @@ public final class PlayerController {
             final HifiCapabilities capabilities;
             final int uacVersion;
             try {
+                // Reading a stream's own header costs a network round trip and is part
+                // of the query below, so flag it before the wait rather than letting
+                // the readout sit on "not known" through it.
+                if (hifi.sourceFormatPending()) {
+                    post(() -> hifiSourceFormatPending.set(true));
+                }
                 devices = hifi.outputDevices();
                 status = hifi.outputStatus();
                 capabilities = hifi.capabilities();
@@ -6480,6 +6492,7 @@ public final class PlayerController {
                     hifiSupported.set(false);
                     hifiReason.set(I18n.tr("settings.hifiChain.reason.unsupported"));
                     hifiDevices.set(Collections.<AudioOutputDevice>emptyList());
+                    hifiSourceFormatPending.set(false);
                 });
                 return;
             }
@@ -6490,6 +6503,9 @@ public final class PlayerController {
     /** Render-thread sink for {@link #refreshHifiStatus()}. */
     private void applyHifiStatus(List<AudioOutputDevice> devices, AudioOutputStatus status,
                                  HifiCapabilities capabilities, int uacVersion) {
+        // The query has returned, so a header read it may have waited for is done
+        // (successfully or not): whatever the format ended up as is what shows.
+        hifiSourceFormatPending.set(false);
         // "Supported" here means the host offers the feature at all; what it can
         // actually do on this device is the capability bits below.
         hifiSupported.set(true);
