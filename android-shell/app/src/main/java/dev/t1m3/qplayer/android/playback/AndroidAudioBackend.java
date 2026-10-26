@@ -80,6 +80,10 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     /** Guarded by {@link #probeLock}: format of {@link #probedSource}. */
     private final Object probeLock = new Object();
     private String probedSource;
+    /** The source whose read failed last — kept out of "pending" so a failed read
+     *  does not show "reading" forever, while the next refresh still retries it
+     *  (a growing cache file becomes readable once the download finishes). */
+    private String probeFailedFor = "";
     private String probedEncoding = "";
     private int probedSampleRate;
     private int probedBitDepth;
@@ -459,9 +463,11 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         if (src == null || src.isEmpty()) return false;
         if (!src.startsWith("http://") && !src.startsWith("https://")) return false;
         synchronized (probeLock) {
-            // A cached source has already been read (or deliberately skipped): only
-            // the one {@link #outputStatus()} is about to read is pending.
-            return !src.equals(probedSource);
+            // A cached source has already been read: only the one
+            // {@link #outputStatus()} is about to read is pending. A read that
+            // already failed is not "pending" either — the row shows "not known"
+            // and the next refresh retries quietly (see probeSourceFormat).
+            return !src.equals(probedSource) && !src.equals(probeFailedFor);
         }
     }
 
@@ -483,15 +489,12 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
                 return;
             }
             if (src.equals(probedSource)) return;
-            probedSource = src;
-            probedEncoding = "";
-            probedSampleRate = 0;
-            probedBitDepth = 0;
             boolean network = src.startsWith("http://") || src.startsWith("https://");
             Map<String, String> headers = sourceHeaders;
             Logger.info("hifi source probe: network={} headers={} src={}",
                     network, headers == null ? 0 : headers.size(), shorten(src));
             MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            boolean failed = false;
             try {
                 if (src.startsWith("content://")) {
                     retriever.setDataSource(appContext, Uri.parse(src));
@@ -517,12 +520,27 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
                 Logger.info("hifi source probe done: enc={} rate={} depth={}",
                         probedEncoding, probedSampleRate, probedBitDepth);
             } catch (Throwable e) {
+                failed = true;
                 Logger.warn("hifi source probe failed: {}", e.toString());
             } finally {
                 try {
                     retriever.release();
                 } catch (Throwable ignored) {
                 }
+            }
+            // Only a successful read is cached. A failed one (a cache file still
+            // being written reads as empty, a stream the host refuses) is left
+            // un-cached so the next refresh retries — but it is recorded as failed
+            // so the row shows "not known" instead of "reading" in the meantime.
+            if (failed) {
+                probedSource = null;
+                probeFailedFor = src;
+                probedEncoding = "";
+                probedSampleRate = 0;
+                probedBitDepth = 0;
+            } else {
+                probedSource = src;
+                probeFailedFor = "";
             }
         }
     }
