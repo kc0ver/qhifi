@@ -645,6 +645,9 @@ public final class PlayerController {
     public final Property<List<PluginRow>> sourcePlugins =
             new Property<>(Collections.<PluginRow>emptyList());
     public final Property<String> primarySourcePlugin = new Property<>("");
+    /** True while the unlock-download helper is enabled. Playlist rows show a
+     *  download button and owned-playlist right-click keeps the song menu. */
+    public final Property<Boolean> downloadHelperEnabled = new Property<>(false);
     /** Every enabled source that can report an account, primary first. The header
      *  properties above stay bound to the primary source alone; this is what the
      *  account page lists so a second signed-in source is not invisible. */
@@ -1216,6 +1219,7 @@ public final class PlayerController {
             rows.add(row);
         }
         sourcePlugins.set(rows);
+        downloadHelperEnabled.set(pluginManager.isEnabled("unlock"));
         pluginUiContributions.set(pluginManager.uiContributions());
         publishCatalogInstalledState();
         // Home content, the account header and the liked set all belong to whichever
@@ -1669,6 +1673,9 @@ public final class PlayerController {
      *  the picker cannot live in the context-menu model. */
     public void requestDownloadQuality(String mediaId) {
         if (mediaId == null || mediaId.isEmpty()) return;
+        // A playerAction contribution always opens its plugin dialog first.
+        // Close it so the host quality sheet is not buried underneath.
+        closePluginDialog();
         FileSavePicker picker = fileSavePicker;
         if (picker == null) {
             showToast(I18n.tr("toast.download.unsupported"));
@@ -2418,6 +2425,15 @@ public final class PlayerController {
 
     public void requestPluginUi(String pluginId, String contributionId) {
         if (pluginId == null || contributionId == null) return;
+        if ("unlock".equals(pluginId) && "download".equals(contributionId)) {
+            Track current = currentTrack();
+            if (current == null || current.canonicalId() == null || current.canonicalId().isEmpty()) {
+                showToast(I18n.tr("toast.download.noCurrent"));
+                return;
+            }
+            requestDownloadQuality(current.canonicalId());
+            return;
+        }
         String label = contributionId;
         for (PluginUiContributionRow row : pluginUiContributions.peek()) {
             if (row.pluginId.equals(pluginId) && row.id.equals(contributionId)) {
