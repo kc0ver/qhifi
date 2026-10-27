@@ -125,6 +125,8 @@ jobs:
         with:
           files: out/*
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          # Prerelease tags (any '-') stay marked as such on the release.
+          prerelease: ${{ contains(github.event.release.tag_name || github.ref_name, '-') }}
           # Curated notes live beside the workflow; update them before each release.
           body_path: ${{ github.workspace }}/.github/release-notes.md
 

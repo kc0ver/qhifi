@@ -85,6 +85,9 @@ QHIFI 只发布 Android 安装包。仓库中的 `desktop-host` 保留用于共�
 
 - 支持简体中文和英文、深浅色主题、封面取色和 Material 动效。
 
+- 整套界面使用 Miuix QML（`miuix.Core`），在 qml4j 上运行；随包 QML 组件在构建期
+  编译，运行时只装载预编译类，不再执行运行时编译。
+
 ### 插件与在线音源
 
 QHIFI 核心不包含在线音源端点，也不分发音源实现。在线能力通过 `.qplug` 插件提供：
@@ -106,15 +109,7 @@ QHIFI 核心不包含在线音源端点，也不分发音源实现。在线能�
 
 - USB 独占输出开关、输出设备选择、采样率跟随、音量模式；
 
-- 后台保活音轨（实验，默认关闭）；
-
-- 开启翻译结果保留（实验，默认关闭）。
-
-“开启翻译结果保留”会把 qml4j 生成的界面类缓存到应用缓存，后续启动跳过 QML 的重复
-编译。首次打开开关后的下一次启动仍会编译一次；安装或更新 APK 时缓存会与 D8 dex 缓存
-一起失效。它只省 QML 编译，界面对象树、绑定和 Rhino JS 仍会在每次启动构建，因此是
-“启动变快”，不是“秒开”。详见
-[qml4j 启动编译分析](docs/qml4j-startup-compile-analysis.md)。
+- 后台保活音轨（实验，默认关闭）。
 
 ## 与上游 QPlayer 的关系
 
@@ -130,7 +125,7 @@ QHIFI 跟随上游 QPlayer 的版本号，版本格式为 `<上游版本>-hifi`�
 | 输出路径   | AAudio / Oboe / 系统音频 | 用户态 usbfs USB 独占（可选）      |
 | 音量     | 上游原生逻辑               | 独占/框架双路线，硬件/软件音量分离        |
 | 设置 tab | HiFi / 播放等           | 原 HiFi 设置并入 **QHIFI** tab |
-| 启动编译   | 每次进程启动编译 QML         | QHIFI 可选持久化场景缓存（实验）       |
+| 启动编译   | 上游构建期预编译 QML       | 跟随上游，构建期预编译；无运行时编译、无可选场景缓存 |
 | CI     | 上游多平台                | 只构建 Android APK           |
 
 上游新增的播放器功能、歌词、界面、插件和桌面修复会随合并进入本仓库；但本 fork 不发布
@@ -161,8 +156,8 @@ QHIFI 与上游 QPlayer 的包名和签名不同，不能直接覆盖安装上�
 
 ### 更新
 
-同一签名的 QHIFI Release 可以直接覆盖安装。安装/更新后第一次启动会重新建立 QML 编译
-缓存（如果开启了实验开关），这是正常行为；播放列表、设置和账号凭据会保留。
+同一签名的 QHIFI Release 可以直接覆盖安装。安装/更新后第一次启动不再编译 QML（构建期
+已生成），播放列表、设置和账号凭据会保留。
 
 ## 使用指南
 
@@ -195,14 +190,6 @@ ROM 仍然把后台的本应用当作“未在放音”，可以打开“后台�
 
 两种模式不要混用；从一种切到另一种时，听到的响度可能变化，这是两条路线电平独立保存
 的结果。
-
-### 实验性的界面编译缓存
-
-路径：**设置 → QHIFI → 启动 → 开启翻译结果保留（实验）**，默认关闭。
-
-开启后，第一次启动会编译并保存 QML 生成的类，第二次启动开始复用；安装或更新 APK 后
-缓存失效并重建。该功能只缓存编译结果，不缓存已经建好的界面对象，因此启动仍会执行对象
-树和绑定的构建。
 
 ## 从源码构建
 
@@ -239,7 +226,8 @@ debug 产物：`android-shell/app/build/outputs/apk/debug/app-debug.apk`；perf 
 
 只有 `perf` 变体允许 shell 性能采集，正式发布包不因此开启 profiling。首次安装或更新后，等待
 `qplayer.lifecycle` 输出 `ready activity=...`，确认权限和插件提示已关闭，再比较相同页面与
-滚动操作，避免把 QML 编译或弹窗当成滚动耗时。
+滚动操作，避免把首次界面装载或弹窗当成滚动耗时。Gradle 在构建主机编译全部随包 QML，再由
+常规 D8 步骤生成 DEX；应用内不再运行 D8，也没有动态编译回退。
 
 Android 测试包使用独立沙箱：从正式版复制本地库缓存时，必须先把索引中的封面路径重定位到
 测试包目录，再以测试包 UID 写入对应缓存文件；直接沿用 `/data/user/0/<正式包名>/…` 会因
@@ -286,6 +274,10 @@ mvn -B -pl player-core,desktop-host -am install
 mvn -pl desktop-host exec:exec
 ```
 
+> 关闭按钮为最小化到托盘（渲染线程销毁，音频继续播放），从托盘「退出」才会真正退出。
+> macOS 的 JVM 开发运行需加 `-XstartOnFirstThread`。上游的 GraalVM 原生分发包不在这里
+> 发布；需要时参见[桌面打包说明](desktop-host/dist/README.md)。
+
 ### 发版
 
 1. 同步更新 `android-shell/app/build.gradle.kts` 的 `versionCode`（+1）和
@@ -324,7 +316,7 @@ git merge upstream/master
 ```sh
 mvn -B -N install -DskipTests
 mvn -B -pl player-core install -DskipTests
-mvn -B -pl desktop-host package -DskipTests
+mvn -B -pl desktop-host -am package -DskipTests
 cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebug
 ```
 
@@ -332,12 +324,13 @@ cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebu
 
 | 路径                                | 说明                                                                                   |
 | --------------------------------- | ------------------------------------------------------------------------------------ |
-| `player-core/`                    | 跨平台核心（Maven）：`PlayerController`、播放/队列、插件 ABI 与沙箱、歌词解析、资源与磁盘缓存、QML 场景缓存。**不含在线音源端点**。 |
+| `player-core/`                    | 跨平台核心（Maven）：`PlayerController`、播放/队列、插件 ABI 与沙箱、歌词解析、资源与磁盘缓存、预编译 QML 场景装载。**不含在线音源端点**。 |
 | `shared-qml/`                     | 共享 QML：`Main.qml`、页面、组件、`miuix.Core`、字体。Android 与桌面开发宿主加载同一份。                        |
+| `qml-aot-tool/`                   | 仅构建期使用的 QML 编译器：生成组件类、场景清单与反射配置，不进入 APK。                                            |
 | `android-shell/`                  | Android 应用（Gradle）：`applicationId com.kc0ver.qhifi`，宿主集成、USB 权限与前台服务。                |
 | `android-shell/app/src/main/cpp/` | 用户态 UAC 驱动：usbfs claim、UAC2 描述符解析、等时 URB、反馈端点。                                       |
 | `desktop-host/`                   | 桌面开发宿主（Maven + LWJGL/GLFW + Skija）；QHIFI 不发布桌面版。                                     |
-| `docs/`                           | 插件 ABI、安全模型、Miuix UI、Android 重建、QHIFI 待办与 qml4j 分析。                                  |
+| `docs/`                           | 插件 ABI、安全模型、Miuix UI、Android 重建、QHIFI 待办。                                            |
 | `.github/`                        | Android-only Release 工作流、Release 正文模板、构建缓存。                                          |
 
 相关文档：
@@ -351,8 +344,6 @@ cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebu
 - [Android 内存重建](docs/android-memory-recreation.md)
 
 - [QHIFI 待办与未完成项](docs/qplayer-hifi-phase2-plan.md)
-
-- [qml4j 启动编译与场景缓存分析](docs/qml4j-startup-compile-analysis.md)
 
 ## 测试与已知边界
 
@@ -370,7 +361,7 @@ cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebu
 - **在线音源依赖插件**：核心不提供任何在线音源端点；插件签名、权限和可用性由插件侧
   决定。
 
-- **首次启用界面缓存仍会编译一次**：这是设计行为，不是缓存失效错误。
+- **QML 在构建期编译**：修改 QML 后必须重新构建 APK，运行时没有源码回退。
 
 - **部分 ROM 会压制后台应用**：独占输出绕开 AudioFlinger 后，系统可能把应用视为
   “未在放音”；可尝试关闭电池优化或开启后台保活音轨。
@@ -401,9 +392,8 @@ QHIFI 会显示当前独占流实际使用的版本；没有打开独占流（�
 部分 ROM 会压制绕开音频框架的后台进程。先关闭 QHIFI 的电池优化；仍无效时可尝试
 “后台保活音轨（实验）”。
 
-**为什么更新后第一次启动又出现“正在编译界面组件”？**
-如果开启了“翻译结果保留”，更新会使场景缓存与 D8 缓存一起失效，下一次启动重新编译
-一次；之后的启动复用缓存。
+**为什么更新后第一次启动不再出现“正在编译界面组件”？**
+QML 已改为构建期预编译，APK 内只有预编译类和场景清单；启动时不再执行运行时编译。
 
 **为什么不能直接覆盖安装上游 QPlayer？**
 包名和签名都不同（`com.kc0ver.qhifi` 对 `dev.t1m3.qplayer`），需要卸载或并存安装；
@@ -442,7 +432,8 @@ QHIFI 的目标是 Android 上的 USB 独占 HiFi 输出；桌面宿主只保留
 - [SPlayer](https://github.com/imsyy/SPlayer)、
   [AMLL](https://github.com/amll-dev/amll-player) —— 流体歌词与歌词动效的参考。
 
-- [swingwebview](https://github.com/webliteca/swingwebview) —— 桌面端网页登录。
+- [swingwebview](https://github.com/webliteca/swingwebview) —— 桌面端网页登录的原生
+  WebView 后端。
 
 - 图标使用 Material Symbols Rounded。
 

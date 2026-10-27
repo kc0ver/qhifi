@@ -1,7 +1,7 @@
 ; Inno Setup script for the QPlayer Windows installer.
 ; Built in CI (see .github/workflows/release.yml) over the QPlayer/ folder that
-; package-windows.ps1 produces (the jpackage app-image: qplayer.exe + app\ + the
-; bundled runtime\). Overridable defines:
+; package-windows.ps1 produces (the GraalVM native qplayer.exe + licenses\).
+; No JVM or Java jars are installed. Overridable defines:
 ;   /DAppVersion=x.y.z   version shown in Add/Remove Programs
 ;   /DSourceFolder=...   the packaged app folder
 ;   /DIconFile=...       the .ico for the setup + shortcuts
@@ -11,6 +11,9 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; Windows' binary version is numeric; retain the full RC version in display text.
+#define VersionWithoutPrerelease Copy(AppVersion, 1, Pos("-", AppVersion + "-") - 1)
+#define NumericAppVersion Copy(VersionWithoutPrerelease, 1, Pos("+", VersionWithoutPrerelease + "+") - 1)
 #ifndef SourceFolder
   #define SourceFolder "..\target\QPlayer"
 #endif
@@ -24,6 +27,8 @@
 AppId={{8F3A1C2E-5B6D-4E7F-9A0B-1C2D3E4F5A6B}
 AppName=QPlayer
 AppVersion={#AppVersion}
+VersionInfoVersion={#NumericAppVersion}
+VersionInfoTextVersion={#AppVersion}
 AppPublisher=t1m3
 DefaultDirName={autopf}\QPlayer
 DefaultGroupName=QPlayer

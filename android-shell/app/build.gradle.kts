@@ -12,11 +12,11 @@ android {
         applicationId = "com.kc0ver.qhifi"
         minSdk = 26
         targetSdk = 34
-        versionCode = 95
+        versionCode = 96
         // Tracks the upstream release it is built from, marked as the fork build
-        // ("1.9.2" → "1.9.2-hifi"). The update check ignores the suffix, so a
-        // release of this fork is only "newer" once its numeric part is.
-        versionName = "1.9.2-hifi"
+        // ("1.9.3-rc.1" → "1.9.3-rc.1-hifi"). The update check ignores the suffix,
+        // so a release of this fork is only "newer" once its numeric part is.
+        versionName = "1.9.3-rc.1-hifi"
         manifestPlaceholders["appLabel"] = "QHIFI"
         // The exclusive USB driver is a native .so; the app is already arm64
         // in practice (the bundled Skija library is), so the native build
@@ -112,6 +112,37 @@ tasks.withType(com.android.build.gradle.internal.tasks.CheckAarMetadataTask::cla
 
 val skijaNative: Configuration by configurations.creating
 
+// Compile the shared build tool on the host JVM. It is never packaged in the APK.
+// Generated classes enter the ordinary AGP Java/D8 pipeline for every variant.
+val qmlCompilerClasspath: Configuration by configurations.creating
+val qmlToolClasses = layout.buildDirectory.dir("qml-aot/tool-classes")
+val qmlBundleOutput = layout.buildDirectory.dir("qml-aot/bundle")
+val compileQmlTool by tasks.registering(JavaCompile::class) {
+    source(fileTree("${rootDir}/../qml-aot-tool/src/main/java") { include("**/*.java") })
+    classpath = qmlCompilerClasspath
+    destinationDirectory.set(qmlToolClasses)
+    options.release.set(8)
+}
+val generateBundledQml by tasks.registering(JavaExec::class) {
+    dependsOn(compileQmlTool)
+    classpath = files(qmlToolClasses) + qmlCompilerClasspath
+    mainClass.set("dev.t1m3.qplayer.aot.build.QmlBundleCompiler")
+    args("--input", "${rootDir}/../shared-qml",
+         "--output", qmlBundleOutput.get().asFile.absolutePath)
+    inputs.files(fileTree("${rootDir}/../shared-qml") {
+        include("**/*.qml", "**/*.js", "**/qmldir")
+    }).withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.dir(qmlBundleOutput)
+}
+
+val qmlRuntimeAssets = layout.buildDirectory.dir("qml-aot/assets")
+val stageQmlRuntimeAssets by tasks.registering(Sync::class) {
+    from("${rootDir}/../shared-qml") {
+        exclude("**/*.qml", "**/qmldir")
+    }
+    into(qmlRuntimeAssets)
+}
+
 val skijaJniDir = layout.buildDirectory.dir("intermediates/qml4j/jniLibs").get().asFile
 
 val extractSkijaSo by tasks.registering(Copy::class) {
@@ -125,6 +156,8 @@ val extractSkijaSo by tasks.registering(Copy::class) {
 
 tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn(extractSkijaSo)
+    dependsOn(generateBundledQml)
+    dependsOn(stageQmlRuntimeAssets)
 }
 tasks.matching {
     it.name == "mergeDebugJniLibFolders" || it.name == "mergeReleaseJniLibFolders"
@@ -135,15 +168,16 @@ tasks.matching {
 
 android {
     sourceSets["main"].jniLibs.srcDir(skijaJniDir)
-    // Vendored miuix.Core component library + fonts (from QPlayer's shared-qml),
-    // at the repo root so desktop-host can share it too. rootDir is android-shell/,
-    // so the repo root is one level up. These QML/font assets aren't published in the
-    // qml4j-core jar, so the app bundles them to build standalone.
-    sourceSets["main"].assets.srcDir("${rootDir}/../shared-qml")
+    // Only images/fonts/JS modules are runtime resources. Component bytecode and
+    // scene manifests come from the generated jar; no QML source fallback ships.
+    sourceSets["main"].assets.srcDir(qmlRuntimeAssets)
 }
 
 dependencies {
     skijaNative("io.github.humbleui:skija-android-arm64:0.143.17")
+    qmlCompilerClasspath("dev.t1m3.qplayer:player-core:0.1.0-SNAPSHOT")
+    implementation(files(qmlBundleOutput.map { it.file("qml-bundle.jar") })
+        .builtBy(generateBundledQml))
 
     // The RECODE refactor merged parser/engine/compiler/render into one module.
     implementation("io.github.timer-err:qml4j-core:0.2.33")
@@ -157,8 +191,6 @@ dependencies {
 
     implementation("io.github.humbleui:skija-shared:0.143.17")
     implementation("io.github.humbleui:skija-android-arm64:0.143.17")
-
-    implementation("com.android.tools:r8:8.13.17")
 
     implementation("androidx.appcompat:appcompat:1.7.0")
 
