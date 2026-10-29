@@ -80,8 +80,12 @@ public class QmlRuntimeLockTest {
                 && System.currentTimeMillis() < deadline) {
             Thread.sleep(10L);
         }
-        assertEquals("writer must wait for the flush lock, not reenter evaluating",
-                Thread.State.BLOCKED, writer.getState());
+        // Either state proves the writer is waiting instead of reentering
+        // evaluate(); the JVM may still report the tail of the latch's timed
+        // wait as TIMED_WAITING when the monitor is contended.
+        Thread.State waiting = writer.getState();
+        assertTrue("writer must wait for the flush lock, not reenter evaluating: " + waiting,
+                waiting == Thread.State.BLOCKED || waiting == Thread.State.TIMED_WAITING);
         releaseEvaluate.countDown();
         flusher.join(3_000L);
         writer.join(3_000L);
