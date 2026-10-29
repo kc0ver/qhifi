@@ -437,6 +437,10 @@ public final class QPlayerActivity extends Activity {
                             "qplayer-volprobe").start();
                     return;
                 }
+                if ("tube".equalsIgnoreCase(cmd)) {
+                    HifiAudioDispatcher.debugTube(arg);
+                    return;
+                }
                 controller.debugCommand(cmd, arg);
                 if ("status".equalsIgnoreCase(cmd)) {
                     android.util.Log.i("qplayer.debug", controller.debugStatus());

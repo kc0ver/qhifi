@@ -6457,6 +6457,14 @@ public final class PlayerController {
         if (hifi != null) hifi.setKeepAliveTrack(on);
     }
 
+    /** Settings rows: tube-tone coloration on the exclusive path. Forwarded as
+     *  one bundle so the backend never sees a half-updated preset; the DSP
+     *  smooths parameter changes internally, so this is safe to call live. */
+    public void setTubeTone(boolean enabled, int preset, int amount, boolean tilt, boolean drift) {
+        HifiOutputControl hifi = hifiControl();
+        if (hifi != null) hifi.setTubeTone(enabled, preset, amount, tilt, drift);
+    }
+
     /** Chain-card refresh button: re-enumerate the output-device list. */
     public void refreshHifiDevices() {
         refreshHifiStatus();

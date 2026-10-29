@@ -41,6 +41,13 @@ Item {
                     : "settings.hifiChain.exclusive.none")
     }
 
+    // Tube model numbers are language-neutral, so the tone row composes them
+    // directly instead of going through the settings-page option labels (those
+    // carry a "· 甜厚" suffix meant for the segmented control).
+    function tubeName(index) {
+        return index === 1 ? "EL34" : index === 2 ? "6L6" : "300B"
+    }
+
     // One binding that reads every player.* it depends on inline: qml4j registers a
     // binding's dependencies from the reads in the expression itself, so the reads
     // must not hide inside a helper function (only the pure formatting does).
@@ -69,6 +76,14 @@ Item {
                      : root.display(player.hifiSourceFormat) },
             { label: i18n.t("settings.hifiChain.format.title"),
               value: root.display(player.hifiOutputFormat) },
+            // The "no silent coloration" rule: with tube tone on, the card says
+            // so (preset + intensity) instead of implying a clean passthrough.
+            { label: i18n.t("settings.hifiChain.tone.title"),
+              value: settings.value("hifiTubeTone") === true
+                     ? i18n.t("settings.hifiChain.tone.tube") + " · "
+                       + root.tubeName(settings.value("hifiTubePreset")) + " · "
+                       + settings.value("hifiTubeAmount") + "%"
+                     : i18n.t("settings.hifiChain.tone.direct") },
             { label: i18n.t("settings.hifiChain.exclusive.title"),
               value: root.exclusiveLabel(player.hifiExclusiveState) },
             { label: i18n.t("settings.hifiChain.output.title"),

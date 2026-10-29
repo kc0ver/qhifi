@@ -183,6 +183,20 @@ public final class SettingsCatalog {
      *  always sits. */
     public static final String HIFI_KEEPALIVE_KEY = "hifiKeepAliveAudioTrack";
 
+    // 「胆味」tube-tone coloration on the exclusive path. A deliberate
+    // coloration, off by default — the chain card says so while it is on, so
+    // "bit-perfect" is never claimed silently.
+    public static final String HIFI_TUBE_TONE_KEY = "hifiTubeTone";
+    /** 0 = 300B, 1 = EL34, 2 = 6L6 — indices into TubeTonePreset. */
+    public static final String HIFI_TUBE_PRESET_KEY = "hifiTubePreset";
+    /** Coloration strength percent; 55 ≈ -37dB H2 at the reference level. */
+    public static final String HIFI_TUBE_AMOUNT_KEY = "hifiTubeAmount";
+    /** Whether the preset's frequency tilt rides along with the harmonics. */
+    public static final String HIFI_TUBE_TILT_KEY = "hifiTubeTilt";
+    /** Slow drift ("breathing"). Off by default so the effect stays
+     *  reproducible and regression-testable. */
+    public static final String HIFI_TUBE_DRIFT_KEY = "hifiTubeDrift";
+
     private SettingsCatalog() {}
 
     public static List<SettingSpec> specs() {
@@ -633,6 +647,44 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.hidden(HIFI_DEVICE_KEY, SettingSpec.TEXT, "")
                 .onlyOn(ANDROID)
+                .build());
+        // 胆味: a deliberate tube-style coloration on the exclusive path. The
+        // sub-rows hang off the tube toggle; the toggle itself hangs off the
+        // master switch (dependsOn is single-hop, so the sub-rows' card can
+        // outlive a disabled master switch — harmless, they are inert without
+        // the exclusive path anyway).
+        out.add(SettingSpec.toggle(HIFI_TUBE_TONE_KEY, HIFI, "settings.hifiTubeTone.title", false)
+                .desc("settings.hifiTubeTone.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiTube")
+                .build());
+        out.add(SettingSpec.segmented(HIFI_TUBE_PRESET_KEY, HIFI, "settings.hifiTubePreset.title", 0,
+                        "settings.hifiTubePreset.300b", "settings.hifiTubePreset.el34",
+                        "settings.hifiTubePreset.6l6")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_TUBE_TONE_KEY)
+                .group("hifiTube")
+                .build());
+        out.add(SettingSpec.slider(HIFI_TUBE_AMOUNT_KEY, HIFI, "settings.hifiTubeAmount.title",
+                        55, 0, 100, 5)
+                .desc("settings.hifiTubeAmount.desc")
+                .unit("%").dots()
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_TUBE_TONE_KEY)
+                .group("hifiTube")
+                .build());
+        out.add(SettingSpec.toggle(HIFI_TUBE_TILT_KEY, HIFI, "settings.hifiTubeTilt.title", true)
+                .desc("settings.hifiTubeTilt.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_TUBE_TONE_KEY)
+                .group("hifiTube")
+                .build());
+        out.add(SettingSpec.toggle(HIFI_TUBE_DRIFT_KEY, HIFI, "settings.hifiTubeDrift.title", false)
+                .desc("settings.hifiTubeDrift.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_TUBE_TONE_KEY)
+                .group("hifiTube")
                 .build());
 
         // ---- 关于 -----------------------------------------------------------

@@ -575,6 +575,13 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case SettingsCatalog.HIFI_KEEPALIVE_KEY:
                     controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
                     break;
+                case SettingsCatalog.HIFI_TUBE_TONE_KEY:
+                case SettingsCatalog.HIFI_TUBE_PRESET_KEY:
+                case SettingsCatalog.HIFI_TUBE_AMOUNT_KEY:
+                case SettingsCatalog.HIFI_TUBE_TILT_KEY:
+                case SettingsCatalog.HIFI_TUBE_DRIFT_KEY:
+                    pushTubeTone();
+                    break;
                 default: break;
             }
         }
@@ -602,6 +609,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
         controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
         controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
+        pushTubeTone();
+    }
+
+    /** The five tube rows move as one bundle: the sink applies them together,
+     *  so a slider drag never leaves a half-updated preset on the DSP. */
+    private void pushTubeTone() {
+        if (controller == null) return;
+        controller.setTubeTone(bool(SettingsCatalog.HIFI_TUBE_TONE_KEY),
+                intOf(SettingsCatalog.HIFI_TUBE_PRESET_KEY),
+                intOf(SettingsCatalog.HIFI_TUBE_AMOUNT_KEY),
+                bool(SettingsCatalog.HIFI_TUBE_TILT_KEY),
+                bool(SettingsCatalog.HIFI_TUBE_DRIFT_KEY));
     }
 
     private void applyLanguage() {

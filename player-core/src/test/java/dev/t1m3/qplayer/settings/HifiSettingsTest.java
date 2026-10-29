@@ -25,16 +25,57 @@ public class HifiSettingsTest {
     @Test
     public void everyHifiRowIsAndroidOnly() {
         Set<String> android = keysOn(SettingsCatalog.HIFI, SettingsCatalog.ANDROID);
-        assertEquals(5, android.size());
+        assertEquals(10, android.size());
         assertTrue(android.contains(SettingsCatalog.HIFI_ENABLED_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_KEEPALIVE_KEY));
         assertTrue(android.contains("action:pickHifiDevice"));
+        assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_TONE_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_PRESET_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_AMOUNT_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_TILT_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_DRIFT_KEY));
 
         // Nothing for the HiFi category at all on desktop: categories() drops a
         // category with no visible rows, which is what keeps the tab off desktop.
         assertTrue(keysOn(SettingsCatalog.HIFI, SettingsCatalog.DESKTOP).isEmpty());
+    }
+
+    /** 胆味: off by default (bit-perfect is the default promise), the sub-rows
+     *  hang off the tube toggle, and the toggle itself hangs off the master
+     *  switch — all in one card. */
+    @Test
+    public void tubeToneDefaultsAndGating() {
+        SettingSpec tone = spec(SettingsCatalog.HIFI_TUBE_TONE_KEY);
+        assertEquals(SettingSpec.SWITCH, tone.type);
+        assertEquals(Boolean.FALSE, tone.def);
+        assertEquals(SettingsCatalog.ANDROID, tone.platform);
+        assertEquals(SettingsCatalog.HIFI_ENABLED_KEY, tone.dependsOn);
+        assertEquals("hifiTube", tone.group);
+
+        SettingSpec preset = spec(SettingsCatalog.HIFI_TUBE_PRESET_KEY);
+        assertEquals(SettingSpec.SEGMENTED, preset.type);
+        assertEquals(0, preset.def);
+        assertEquals(3, preset.options.size());
+        assertEquals(SettingsCatalog.HIFI_TUBE_TONE_KEY, preset.dependsOn);
+        assertEquals("hifiTube", preset.group);
+
+        SettingSpec amount = spec(SettingsCatalog.HIFI_TUBE_AMOUNT_KEY);
+        assertEquals(SettingSpec.SLIDER, amount.type);
+        assertEquals(55, amount.def);
+        assertEquals(0, amount.min);
+        assertEquals(100, amount.max);
+        assertEquals(SettingsCatalog.HIFI_TUBE_TONE_KEY, amount.dependsOn);
+
+        SettingSpec tilt = spec(SettingsCatalog.HIFI_TUBE_TILT_KEY);
+        assertEquals(Boolean.TRUE, tilt.def);
+        assertEquals(SettingsCatalog.HIFI_TUBE_TONE_KEY, tilt.dependsOn);
+
+        // Drift stays off by default so the coloration is reproducible.
+        SettingSpec drift = spec(SettingsCatalog.HIFI_TUBE_DRIFT_KEY);
+        assertEquals(Boolean.FALSE, drift.def);
+        assertEquals(SettingsCatalog.HIFI_TUBE_TONE_KEY, drift.dependsOn);
     }
 
     @Test

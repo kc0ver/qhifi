@@ -703,6 +703,48 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
         }
     }
 
+    /** Debug hook (`adb shell am broadcast -a dev.t1m3.qplayer.DEBUG --es cmd
+     *  tube --es arg <...>`): drive the tube-tone core without any UI. Accepts
+     *  {@code on|off}, {@code amount:<0..100>}, {@code preset:<0..2>},
+     *  {@code tilt:on|off}, {@code drift:on|off}, {@code force:<a>}, and
+     *  {@code status}. Writes the same statics the settings push writes, so it
+     *  overrides them until the next settings change; values arrive on the next
+     *  processed block. */
+    public static void debugTube(String arg) {
+        String a = arg == null ? "" : arg.trim();
+        String lower = a.toLowerCase(java.util.Locale.ROOT);
+        if ("on".equals(lower) || "off".equals(lower)) {
+            TubeToneSink.setEnabled("on".equals(lower));
+        } else if (lower.startsWith("preset:")) {
+            try {
+                TubeToneSink.setPresetIndex(Integer.parseInt(lower.substring(7).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        } else if (lower.startsWith("amount:")) {
+            try {
+                TubeToneSink.setAmount(Integer.parseInt(lower.substring(7).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        } else if (lower.startsWith("tilt:")) {
+            TubeToneSink.setTilt("on".equals(lower.substring(5).trim())
+                    || "true".equals(lower.substring(5).trim()));
+        } else if (lower.startsWith("drift:")) {
+            TubeToneSink.setDrift("on".equals(lower.substring(6).trim())
+                    || "true".equals(lower.substring(6).trim()));
+        } else if (lower.startsWith("force:")) {
+            // 诊断：直接覆盖非线性系数，绕过强度与包络。用来确认这条链路
+            // 真的在改动样本——设成 0.3 时失真应当刺耳，0 恢复。
+            try {
+                TubeToneSink.setForceA(Float.parseFloat(lower.substring(6).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        TubeToneSink.logState();
+        // 同一份状态再打一条到 logcat（tag 与调试广播一致），这样
+        // `adb logcat -s qplayer.debug` 就能看到 a 值在漂移中缓慢变化。
+        android.util.Log.i("qplayer.debug", "tube " + TubeToneSink.stateText());
+    }
+
     @Override
     public void setVolumeMode(int mode) {
         synchronized (lock) {
@@ -759,6 +801,19 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
         keepAliveTrack = on;
         AndroidDirectAudioBackend directBackend = direct;
         if (directBackend != null) directBackend.setKeepAliveTrack(on);
+    }
+
+    /** Settings rows (P1): the tube-tone bundle lands on the sink's statics,
+     *  which the next processed block picks up — live, no stream restart. The
+     *  adb broadcast ({@link #debugTube}) writes the same fields, so it still
+     *  works as a no-UI override while a session is running. */
+    @Override
+    public void setTubeTone(boolean enabled, int preset, int amount, boolean tilt, boolean drift) {
+        TubeToneSink.setEnabled(enabled);
+        TubeToneSink.setPresetIndex(preset);
+        TubeToneSink.setAmount(amount);
+        TubeToneSink.setTilt(tilt);
+        TubeToneSink.setDrift(drift);
     }
 
     @Override

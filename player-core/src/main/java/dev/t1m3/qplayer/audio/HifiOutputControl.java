@@ -101,4 +101,11 @@ public interface HifiOutputControl {
 
     /** Force playback onto {@code deviceId}; "" means automatic. */
     void selectOutputDevice(String deviceId);
+
+    /** Tube-tone coloration settings, pushed as one bundle because the rows
+     *  are only meaningful together. Live: the next processed block picks them
+     *  up, with smoothing inside the DSP — no stream restart, no click.
+     *  A no-op on hosts without the coloration stage (desktop, test doubles). */
+    default void setTubeTone(boolean enabled, int preset, int amount, boolean tilt, boolean drift) {
+    }
 }

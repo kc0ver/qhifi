@@ -40,6 +40,8 @@ final class UsbIsoSink implements PcmSink {
     private long framesWritten;
     private volatile String lastError = "";
     private boolean opened;
+    /** 「胆味」音染，挂在送 USB 之前的一步；关闭时不分配也不计算。 */
+    private final TubeToneSink tube = new TubeToneSink();
 
     UsbIsoSink(Context context) {
         this.appContext = context.getApplicationContext();
@@ -192,6 +194,8 @@ final class UsbIsoSink implements PcmSink {
         // readout must show what the DAC actually runs at.
         rate = UacOutput.sampleRate();
         floatPcm = UacOutput.floatPcm();
+        // 容器类型以驱动实际接受的那个为准，胆味处理器必须按它做样本转换。
+        tube.configure(rate, channels, floatPcm);
         opened = true;
         framesWritten = 0L;
         return true;
@@ -221,7 +225,7 @@ final class UsbIsoSink implements PcmSink {
     @Override
     public int write(ByteBuffer src, int bytes) {
         if (!opened || bytes <= 0) return 0;
-        int written = UacOutput.write(src, bytes);
+        int written = UacOutput.write(tube.process(src, bytes), bytes);
         if (written < 0) {
             lastError = mapError(UacOutput.lastError());
             Logger.warn("usb exclusive write failed: {}", lastError);
@@ -250,6 +254,8 @@ final class UsbIsoSink implements PcmSink {
 
     @Override
     public void flush() {
+        // 队列被丢掉之后，滤波器的历史也不属于新的时间基了。
+        tube.reset();
         if (opened) UacOutput.flush();
     }
 

@@ -408,6 +408,12 @@ private:
     // host-controller completion errors. Nonzero samples that never exceed a few
     // LSB are inaudible even though the payload audit calls them "live".
     int64_t peakAbs_ = 0;
+    // Samples that hit the container's full scale since the last beat. Peak alone
+    // says "at least one loud sample"; this says how often the stream is actually
+    // clipped, which is what makes 16-bit output sound gritty. Int containers
+    // only — a 4-byte subslot may be float PCM, where an int full scale means
+    // nothing.
+    int64_t clippedSamples_ = 0;
     int64_t urbStatusErrors_ = 0;
     int64_t packetStatusErrors_ = 0;
 
@@ -1227,6 +1233,7 @@ void UacStream::refillUrb(IsoUrb& urb) {
                 memcpy(&v, d + i, 2);
                 int64_t a = v < 0 ? -(int64_t) v : (int64_t) v;
                 if (a > peak) peak = a;
+                if (a >= 32767) clippedSamples_++;
             }
         } else if (subslotSize_ == 3) {
             for (size_t i = 0; i + 3 <= n; i += 3) {
@@ -1234,6 +1241,7 @@ void UacStream::refillUrb(IsoUrb& urb) {
                 if (v & 0x800000) v -= 0x1000000;
                 int64_t a = v < 0 ? -(int64_t) v : (int64_t) v;
                 if (a > peak) peak = a;
+                if (a >= 8388607) clippedSamples_++;
             }
         } else if (subslotSize_ == 4) {
             for (size_t i = 0; i + 4 <= n; i += 4) {
@@ -1383,6 +1391,7 @@ void UacStream::feedLoop() {
     int64_t lastWritten = 0;
     int64_t lastStarved = 0;
     int64_t lastFlushes = 0;
+    int64_t lastClipped = 0;
     int64_t lastUrbErrors = 0;
     int64_t lastPacketErrors = 0;
     while (running_) {
@@ -1420,20 +1429,23 @@ void UacStream::feedLoop() {
                 int64_t urbErrDelta = urbStatusErrors_ - lastUrbErrors;
                 int64_t pktErrDelta = packetStatusErrors_ - lastPacketErrors;
                 int64_t peak = peakAbs_;
+                int64_t clipDelta = clippedSamples_ - lastClipped;
                 lastWritten = totalWrittenBytes_;
                 lastStarved = starvedUrbs_;
                 lastFlushes = flushCount_;
+                lastClipped = clippedSamples_;
                 lastUrbErrors = urbStatusErrors_;
                 lastPacketErrors = packetStatusErrors_;
                 peakAbs_ = 0;
                 LOGI("beat: wrote=%lldB/2s ring=%lld/%zu inflight=%lldB urbs=%d"
                      " reaps=%lld starved=%lld flushes=%lld flushedTotal=%lldB"
-                     " payload=%s peak=%lld errs=%lld/%lld fbRate=%lld",
+                     " payload=%s peak=%lld clipped=%lld errs=%lld/%lld fbRate=%lld",
                      (long long) writtenDelta, (long long) ringBytes_, ring_.size(),
                      (long long) inFlightBytes_, inFlight, (long long) beatReaps,
                      (long long) starvedDelta, (long long) flushDelta,
                      (long long) flushedBytes_,
                      payloadLive_ ? "live" : "stuck", (long long) peak,
+                     (long long) clipDelta,
                      (long long) urbErrDelta, (long long) pktErrDelta,
                      (long long) feedbackRate_);
             }
