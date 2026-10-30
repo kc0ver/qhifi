@@ -60,6 +60,9 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private Runnable onPaused;
     private Runnable onResumed;
     private Runnable onError;
+    private Runnable playbackError;
+    private Runnable playbackComplete;
+    private Runnable playbackStart;
 
     // Audio focus: a full loss (another player, screen-off) and a transient duck
     // are both ignored; only a real interruption (a call) pauses us. See
@@ -70,7 +73,7 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private boolean hasFocus;
     private boolean resumeOnGain;
     private boolean buffering;
-    private String cachePendingPath;
+    private long playbackGeneration;
     private String cacheCompletePath;
     private WifiManager.WifiLock wifiLock;
     private final Handler stallHandler = new Handler(Looper.getMainLooper());
@@ -109,7 +112,16 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
 
     @Override
     public synchronized void play(String src, Map<String, String> headers, long startMs) {
+        playSource(src, headers, startMs, onComplete, onStarted, onError);
+    }
+
+    private void playSource(String src, Map<String, String> headers, long startMs,
+                            Runnable sourceComplete, Runnable sourceStart, Runnable sourceError) {
         if (src == null || src.isEmpty()) return;
+        playbackGeneration++;
+        playbackError = sourceError;
+        playbackComplete = sourceComplete;
+        playbackStart = sourceStart;
         releasePlayer();
         source = src;
         sourceHeaders = headers != null ? headers : Collections.<String, String>emptyMap();
@@ -117,31 +129,27 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         wantPlay = true;
         prepared = false;
         cacheCompletePath = null;
-        requestFocus();
-
-        MediaPlayer mp = new MediaPlayer();
-        // Network-backed tracks still need the CPU while the screen is off. Without
-        // MediaPlayer's partial wake lock some OEMs suspend the streaming/decoder
-        // path, report a MEDIA_ERROR_* and make PlayerController skip to the next
-        // track even though the current song has not actually reached its end.
-        mp.setWakeMode(appContext, PowerManager.PARTIAL_WAKE_LOCK);
-        mp.setAudioAttributes(new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build());
-        mp.setOnPreparedListener(this::onPrepared);
-        mp.setOnSeekCompleteListener(this::onSeekComplete);
-        mp.setOnCompletionListener(p -> onCompleted(p));
-        mp.setOnErrorListener(this::onPlayerError);
-        mp.setOnInfoListener(this::onPlayerInfo);
-        player = mp;
         try {
+            requestFocus();
+            MediaPlayer mp = new MediaPlayer();
+            player = mp;
+            // Streaming must keep decoding when the screen is off.
+            mp.setWakeMode(appContext, PowerManager.PARTIAL_WAKE_LOCK);
+            mp.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build());
+            mp.setOnPreparedListener(this::onPrepared);
+            mp.setOnSeekCompleteListener(this::onSeekComplete);
+            mp.setOnCompletionListener(this::onCompleted);
+            mp.setOnErrorListener(this::onPlayerError);
+            mp.setOnInfoListener(this::onPlayerInfo);
             Logger.info("MediaPlayer: setDataSource + prepareAsync");
             setDataSource(mp, src, headers);
             mp.prepareAsync();
-        } catch (IOException | IllegalStateException e) {
-            Logger.error("MediaPlayer setDataSource failed: {}", e.getMessage());
-            releasePlayer();
+        } catch (IOException | RuntimeException e) {
+            Logger.error("MediaPlayer startup failed: {}", e.toString());
+            failPlayback();
         }
     }
 
@@ -165,14 +173,19 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         // media thread. Never let an old source start, publish onStarted, or apply its
         // state to the replacement MediaPlayer after a rapid track switch.
         if (player != preparedPlayer) return;
-        prepared = true;
-        Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
-        applyVolume();
-        if (pendingSeekMs > 0L) {
-            seekingStart = true;
-            preparedPlayer.seekTo(pendingSeekMs, MediaPlayer.SEEK_CLOSEST);
-        } else {
-            startPreparedPlayer();
+        try {
+            prepared = true;
+            Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
+            applyVolume();
+            if (pendingSeekMs > 0L) {
+                seekingStart = true;
+                preparedPlayer.seekTo(pendingSeekMs, MediaPlayer.SEEK_CLOSEST);
+            } else {
+                startPreparedPlayer();
+            }
+        } catch (RuntimeException error) {
+            Logger.error("MediaPlayer prepare/start failed: {}", error.toString());
+            failPlayback();
         }
     }
 
@@ -183,15 +196,19 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     }
 
     private void startPreparedPlayer() {
-        if (player == null || !prepared || seekingStart || !wantPlay) return;
-        if (buffering && tryPlayCompleteCache()) return;
-        if (!player.isPlaying()) player.start();
-        holdWifiLock(source);
-        scheduleStallCheck();
-        // Preparing while paused defers this notification until resume really starts audio.
-        if (!playbackStarted) {
-            playbackStarted = true;
-            fire(onStarted);
+        try {
+            if (player == null || !prepared || seekingStart || !wantPlay) return;
+            if (buffering && tryPlayCompleteCache()) return;
+            if (!player.isPlaying()) player.start();
+            holdWifiLock(source);
+            scheduleStallCheck();
+            if (!playbackStarted) {
+                playbackStarted = true;
+                fire(playbackStart);
+            }
+        } catch (RuntimeException error) {
+            Logger.error("MediaPlayer start failed: {}", error.toString());
+            failPlayback();
         }
     }
 
@@ -209,17 +226,34 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private synchronized void onCompleted(MediaPlayer completedPlayer) {
         if (player != completedPlayer) return;
         Logger.info("MediaPlayer: completed");
-        fire(onComplete);
+        fire(playbackComplete);
     }
 
     private synchronized boolean onPlayerError(MediaPlayer failedPlayer, int what, int extra) {
         if (player != failedPlayer) return true;
         Logger.error("MediaPlayer error: what={} extra={}", what, extra);
-        fire(onError);
+        failPlayback();
         // PlayerController's error path retries stale URLs once and advances when
         // that fails. Firing completion too would race a second auto-advance against
         // that recovery and could replace the retried track.
         return true;
+    }
+
+    private void failPlayback() {
+        long generation = playbackGeneration;
+        Runnable errorListener = playbackError;
+        wantPlay = false;
+        stallHandler.removeCallbacks(stallCheck);
+        releaseWifiLock();
+        releasePlayer();
+        // Even synchronous setDataSource errors are delivered after play() has
+        // returned, so the controller's playing/loading intent is already set.
+        stallHandler.post(() -> {
+            synchronized (AndroidAudioBackend.this) {
+                if (playbackGeneration != generation) return;
+                fire(errorListener);
+            }
+        });
     }
 
     @Override
@@ -243,10 +277,7 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     public synchronized void resume() {
         wantPlay = true;
         requestFocus();
-        try {
-            startPreparedPlayer();
-        } catch (IllegalStateException ignored) {
-        }
+        startPreparedPlayer();
     }
 
     @Override
@@ -333,7 +364,6 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
 
     @Override
     public synchronized void bindGrowingCache(String pendingPath, String completePath, long durationMs) {
-        this.cachePendingPath = pendingPath;
         this.cacheCompletePath = completePath;
     }
 
@@ -360,12 +390,16 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
         if (!file.isFile() || file.length() == 0) return false;
         long pos = position();
         Logger.info("MediaPlayer: switching to complete cache at {}ms", pos);
-        play(path, pos);
+        playSource(path, Collections.emptyMap(), pos, playbackComplete, playbackStart, playbackError);
         return true;
     }
 
     @Override
     public synchronized void release() {
+        playbackGeneration++;
+        playbackError = null;
+        playbackComplete = null;
+        playbackStart = null;
         stallHandler.removeCallbacks(stallCheck);
         releaseWifiLock();
         releasePlayer();
@@ -763,7 +797,9 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
                 Logger.warn("MediaPlayer stalled while wantPlay; restarting");
                 try {
                     player.start();
-                } catch (IllegalStateException ignored) {
+                } catch (IllegalStateException error) {
+                    Logger.error("MediaPlayer restart failed: {}", error.toString());
+                    failPlayback();
                 }
             }
         }

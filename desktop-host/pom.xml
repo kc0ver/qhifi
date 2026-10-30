@@ -32,7 +32,7 @@
              check). Local dev default; the release workflow overrides it with the
              git tag (-Dqplayer.app.version=…) so release binaries match the tag
              without a committed bump, like the macOS/Windows packagers. -->
-        <qplayer.app.version>1.9.3</qplayer.app.version>
+        <qplayer.app.version>1.9.4-rc.1</qplayer.app.version>
         <!-- exec:exec run knobs. Empty gfx means use the persisted in-app setting;
              pass -Dgfx=gl|vulkan only when an explicit development override is
              wanted. -->
@@ -200,6 +200,23 @@
                             <classpathScope>runtime</classpathScope>
                             <arguments combine.self="override">
                                 <argument>--output</argument><argument>${project.build.outputDirectory}</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>smoke-packaged-qml</id>
+                        <phase>integration-test</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <!-- JNI and process-wide font workers belong to the app JVM,
+                                 not Maven's temporary exec:java classloader. -->
+                            <executable>${java.home}/bin/java</executable>
+                            <classpathScope>runtime</classpathScope>
+                            <arguments combine.self="override">
+                                <argument>--enable-native-access=ALL-UNNAMED</argument>
+                                <argument>-classpath</argument><classpath/>
+                                <argument>dev.t1m3.qplayer.desktop.app.Main</argument>
+                                <argument>--build-smoke</argument>
                             </arguments>
                         </configuration>
                     </execution>

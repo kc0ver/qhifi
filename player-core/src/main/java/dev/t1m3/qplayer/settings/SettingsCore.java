@@ -115,7 +115,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     /** Extra reaction to a value change, on top of the built-in effects. Fires
      *  after the new value is stored and persisted. */
     public void onChange(String key, Consumer<Object> handler) {
-        hooks.computeIfAbsent(key, k -> new ArrayList<>()).add(handler);
+        synchronized (hooks) {
+            hooks.computeIfAbsent(key, k -> new ArrayList<>()).add(handler);
+        }
+    }
+
+    public void removeOnChange(String key, Consumer<Object> handler) {
+        synchronized (hooks) {
+            List<Consumer<Object>> handlers = hooks.get(key);
+            if (handlers == null) return;
+            handlers.remove(handler);
+            if (handlers.isEmpty()) hooks.remove(key);
+        }
     }
 
     /** Host hook for a platform directory chooser. The host must invoke the
@@ -536,9 +547,13 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         recomputeDark();
         applyLyricConfig();
         Fonts.setSelection(fontSelection());
-        pushToController();
+        if (controller != null) {
+            controller.setVolume(appVolume.peek() / 100f);
+            controller.restoreExclusiveVolume(exclusiveVolume.peek() / 100f);
+        }
         for (SettingSpec s : specs) {
             if (!s.hasValue()) continue;
+            applyControllerSetting(s.key);
             fireHooks(s.key, peek(s.key));
         }
     }
@@ -550,66 +565,57 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
             applyLyricConfig();
         } else if ("darkMode".equals(spec.key)) {
             recomputeDark();
-        } else if (controller != null) {
-            switch (spec.key) {
-                case "monet": controller.setMonetEnabled(bool("monet")); break;
-                case "mirror": controller.setUpdateMirror(bool("mirror")); break;
-                case "fade": controller.setFadeEnabled(bool("fade")); break;
-                case "highQuality": controller.setHighQualityEnabled(bool("highQuality")); break;
-                case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB")); break;
-                case SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY:
-                    controller.setHomePlaylistLimit(intOf(SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY));
-                    break;
-                case SettingsCatalog.HIFI_ENABLED_KEY:
-                    controller.setHifiEnabled(bool(SettingsCatalog.HIFI_ENABLED_KEY));
-                    break;
-                case SettingsCatalog.HIFI_FOLLOW_RATE_KEY:
-                    controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
-                    break;
-                case SettingsCatalog.HIFI_VOLUME_MODE_KEY:
-                    controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
-                    break;
-                case SettingsCatalog.HIFI_DEVICE_KEY:
-                    controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
-                    break;
-                case SettingsCatalog.HIFI_KEEPALIVE_KEY:
-                    controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
-                    break;
-                case SettingsCatalog.HIFI_TUBE_TONE_KEY:
-                case SettingsCatalog.HIFI_TUBE_PRESET_KEY:
-                case SettingsCatalog.HIFI_TUBE_AMOUNT_KEY:
-                case SettingsCatalog.HIFI_TUBE_TILT_KEY:
-                case SettingsCatalog.HIFI_TUBE_DRIFT_KEY:
-                    pushTubeTone();
-                    break;
-                default: break;
-            }
+        } else {
+            applyControllerSetting(spec.key);
         }
         fireHooks(spec.key, v);
     }
 
     private void fireHooks(String key, Object v) {
-        List<Consumer<Object>> list = hooks.get(key);
-        if (list == null) return;
-        for (Consumer<Object> h : list) h.accept(v);
+        List<Consumer<Object>> listeners;
+        synchronized (hooks) {
+            List<Consumer<Object>> registered = hooks.get(key);
+            if (registered == null) return;
+            listeners = new ArrayList<>(registered);
+        }
+        for (Consumer<Object> listener : listeners) listener.accept(v);
     }
 
-    private void pushToController() {
+    private void applyControllerSetting(String key) {
         if (controller == null) return;
-        controller.setVolume(appVolume.peek() / 100f);
-        controller.restoreExclusiveVolume(exclusiveVolume.peek() / 100f);
-        controller.setMonetEnabled(bool("monet"));
-        controller.setUpdateMirror(bool("mirror"));
-        controller.setFadeEnabled(bool("fade"));
-        controller.setHighQualityEnabled(bool("highQuality"));
-        controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB"));
-        controller.setHomePlaylistLimit(intOf(SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY));
-        controller.setHifiEnabled(bool(SettingsCatalog.HIFI_ENABLED_KEY));
-        controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
-        controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
-        controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
-        controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
-        pushTubeTone();
+        switch (key) {
+            case "monet": controller.setMonetEnabled(bool(key)); break;
+            case "mirror": controller.setUpdateMirror(bool(key)); break;
+            case "fade": controller.setFadeEnabled(bool(key)); break;
+            case "highQuality": controller.setHighQualityEnabled(bool(key)); break;
+            case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf(key)); break;
+            case SettingsCatalog.HOME_PLAYLIST_LIMIT_KEY:
+                controller.setHomePlaylistLimit(intOf(key));
+                break;
+            case SettingsCatalog.HIFI_ENABLED_KEY:
+                controller.setHifiEnabled(bool(SettingsCatalog.HIFI_ENABLED_KEY));
+                break;
+            case SettingsCatalog.HIFI_FOLLOW_RATE_KEY:
+                controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
+                break;
+            case SettingsCatalog.HIFI_VOLUME_MODE_KEY:
+                controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+                break;
+            case SettingsCatalog.HIFI_DEVICE_KEY:
+                controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));
+                break;
+            case SettingsCatalog.HIFI_KEEPALIVE_KEY:
+                controller.setHifiKeepAliveTrack(bool(SettingsCatalog.HIFI_KEEPALIVE_KEY));
+                break;
+            case SettingsCatalog.HIFI_TUBE_TONE_KEY:
+            case SettingsCatalog.HIFI_TUBE_PRESET_KEY:
+            case SettingsCatalog.HIFI_TUBE_AMOUNT_KEY:
+            case SettingsCatalog.HIFI_TUBE_TILT_KEY:
+            case SettingsCatalog.HIFI_TUBE_DRIFT_KEY:
+                pushTubeTone();
+                break;
+            default: break;
+        }
     }
 
     /** The five tube rows move as one bundle: the sink applies them together,

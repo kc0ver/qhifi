@@ -66,7 +66,7 @@ public class PlayerControllerHifiTest {
             assertTrue(controller.hifiEnabled.peek());
             assertFalse(controller.hifiSupported.peek());
         } finally {
-            if (controller != null) controller.shutdown();
+            if (controller != null) controller.shutdownAsync().join();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
@@ -126,7 +126,7 @@ public class PlayerControllerHifiTest {
             awaitHifi(underTest, () -> !underTest.hifiDeviceName.peek().isEmpty());
             assertEquals(2, controller.hifiDevices.peek().size());
         } finally {
-            if (controller != null) controller.shutdown();
+            if (controller != null) controller.shutdownAsync().join();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
@@ -160,7 +160,7 @@ public class PlayerControllerHifiTest {
             assertFalse(controller.hifiSourceFormatPending.peek());
             assertEquals("FLAC 96kHz", controller.hifiSourceFormat.peek());
         } finally {
-            if (controller != null) controller.shutdown();
+            if (controller != null) controller.shutdownAsync().join();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
@@ -196,7 +196,7 @@ public class PlayerControllerHifiTest {
             controller.setVolume(0.5f);
             assertEquals(0.5f, backend.level, 1e-6);
         } finally {
-            if (controller != null) controller.shutdown();
+            if (controller != null) controller.shutdownAsync().join();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
@@ -241,7 +241,7 @@ public class PlayerControllerHifiTest {
             controller.setHifiEnabled(true);
             assertEquals(0.4f, backend.level, 1e-6);
         } finally {
-            if (controller != null) controller.shutdown();
+            if (controller != null) controller.shutdownAsync().join();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
