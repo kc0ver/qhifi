@@ -111,8 +111,11 @@ jobs:
         with:
           files: out/*
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          # Prerelease tags (any '-') stay marked as such on the release.
-          prerelease: ${{ contains(github.event.release.tag_name || github.ref_name, '-') }}
+          # Only upstream-style prerelease tags are marked as such. Every QHIFI
+          # tag carries the "-hifi" suffix, so matching any '-' would mark stable
+          # releases prerelease and hide them from releases/latest (the app's
+          # update check reads that endpoint).
+          prerelease: ${{ contains(github.event.release.tag_name || github.ref_name, '-rc.') || contains(github.event.release.tag_name || github.ref_name, '-alpha') || contains(github.event.release.tag_name || github.ref_name, '-beta') }}
           # Curated notes live beside the workflow; update them before each release.
           body_path: ${{ github.workspace }}/.github/release-notes.md
 
