@@ -304,7 +304,10 @@ public final class QPlayerActivity extends Activity {
         lyricsOpenListener = open -> {
             runOnUiThread(QPlayerActivity.this::updateImmersive);
         };
-        controller.lyricsOpen.addListener(lyricsOpenListener);
+        // Property listener lists are owned by the QML runtime lock (see QmlGLSurfaceView).
+        synchronized (dev.t1m3.qplayer.qml.QmlRuntimeLock.MONITOR) {
+            controller.lyricsOpen.addListener(lyricsOpenListener);
+        }
 
         // Enabling the exclusive USB driver asks the user, once per install, to
         // exempt the app from battery optimization: OEM doze freezes background
@@ -336,7 +339,9 @@ public final class QPlayerActivity extends Activity {
         settings.setFontPicker(this::pickFontFile);
         systemBarsListener = dark ->
                 runOnUiThread(() -> applySystemBars(Boolean.TRUE.equals(dark)));
-        settings.resolvedDark.addListener(systemBarsListener);
+        synchronized (dev.t1m3.qplayer.qml.QmlRuntimeLock.MONITOR) {
+            settings.resolvedDark.addListener(systemBarsListener);
+        }
         settings.registerAction("clearCache", boundController::clearDiskCache);
         settings.registerAction("checkUpdate", boundController::checkForUpdateManual);
         settings.registerAction("openRepo",
@@ -1334,7 +1339,9 @@ public final class QPlayerActivity extends Activity {
             debugReceiver = null;
         }
         if (controller != null && lyricsOpenListener != null) {
-            controller.lyricsOpen.removeListener(lyricsOpenListener);
+            synchronized (dev.t1m3.qplayer.qml.QmlRuntimeLock.MONITOR) {
+                controller.lyricsOpen.removeListener(lyricsOpenListener);
+            }
             lyricsOpenListener = null;
         }
         if (webAuthScript != null) {
@@ -1356,7 +1363,9 @@ public final class QPlayerActivity extends Activity {
             glView = null;
         }
         if (settings != null && systemBarsListener != null) {
-            settings.resolvedDark.removeListener(systemBarsListener);
+            synchronized (dev.t1m3.qplayer.qml.QmlRuntimeLock.MONITOR) {
+                settings.resolvedDark.removeListener(systemBarsListener);
+            }
             systemBarsListener = null;
         }
         if (settings != null) {

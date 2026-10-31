@@ -422,6 +422,11 @@ QHIFI 的目标是 Android 上的 USB 独占 HiFi 输出；桌面宿主只保留
 
 - 发版前更新 `.github/release-notes.md`，否则 Release 会沿用上一次的说明。
 
+构建产物先保存到 workflow artifacts。全部构建成功后，`publish` 统一上传附件，
+上传成功后才将 Release 转为正式版或预发布版。发布已有 tag 时不传 `target_commitish`，
+避免旧提交与当前 `master` 的工作流文件不同而触发额外权限检查；此操作不移动 tag。
+CI 不再自动运行测试；测试代码和本地测试命令保留。
+
 ## 致谢
 
 - [QPlayer](https://github.com/TIMER-err/qplayer) —— 本 fork 的上游播放器与共享核心。
