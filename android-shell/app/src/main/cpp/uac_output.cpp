@@ -565,10 +565,10 @@ bool UacStream::open(int fd, int requestedRate, int channels, bool floatPcm,
     packetAcc_ = 0;
     feedbackRate_ = 0;
     opened_ = true;
-    // The level the DAC's buttons left it at, read BEFORE any isochronous
-    // traffic: once the stream runs this device refuses GET_CUR outright. The
-    // app adopts this level instead of stomping it, so switching to exclusive
-    // never changes loudness by itself.
+    // Diagnostic only: the level the DAC's buttons left it at, read BEFORE any
+    // isochronous traffic (once the stream runs this device refuses GET_CUR
+    // outright). Exclusive mode does NOT adopt this level — the app writes its
+    // own exclusive level — the value is logged to explain the device state.
     initialVolumeRaw_ = -32769;
     if (info_.volumeKnown) {
         uint16_t vi = ((uint16_t) (info_.volumeUnitId != 0 ? info_.volumeUnitId

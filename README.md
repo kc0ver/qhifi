@@ -117,7 +117,7 @@ QHIFI 跟随上游 QPlayer 的版本号，版本格式为 `<上游版本>-hifi`�
 `v<上游版本>-hifi`。`master` 保留上游历史与真实的合并基，便于定期
 `git merge upstream/master`；不要 rebase、重排或改写历史。
 
-当前同步基线：上游 `1.9.3`。上游已把随包 QML 改为构建期预编译，本 fork 跟随该
+当前同步基线：上游 `1.9.4`。上游已把随包 QML 改为构建期预编译，本 fork 跟随该
 方案，因此不再有运行时 QML 编译，也没有可选的场景缓存。
 
 | 项目     | 上游 QPlayer           | QHIFI                     |
