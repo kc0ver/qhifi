@@ -3856,6 +3856,9 @@ public final class PlayerController {
     /** Raw (un-mirrored) github.com APK download url of the newer release, or "" when
      *  the release has no APK asset. The in-app downloader prefixes mirrors onto it. */
     private volatile String updateApkRaw = "";
+    /** Lowercase hex SHA-256 of the newer release's asset ("" when GitHub exposes no
+     *  digest). Hosts use it to verify both fresh downloads and cached packages. */
+    private volatile String updateApkSha256 = "";
     /** Running app version, injected by the host (PackageInfo.versionName). */
     private volatile String currentVersion = "";
     /** Same value, exposed to QML (e.g. the About card). */
@@ -3875,9 +3878,10 @@ public final class PlayerController {
     }
 
     /** Host hook to download an APK in-app and launch the system package installer.
-     *  Receives candidate urls (mirror-prefixed, then direct) to try in order. */
+     *  Receives candidate urls (mirror-prefixed, then direct) to try in order, plus
+     *  the expected lowercase hex SHA-256 of the asset ("" when unavailable). */
     public interface Installer {
-        void downloadAndInstall(String[] urls);
+        void downloadAndInstall(String[] urls, String sha256);
     }
 
     private volatile Installer installer;
@@ -3912,8 +3916,9 @@ public final class PlayerController {
                 return;
             }
             final String[] candidates = downloadCandidates(apk);
+            final String sha256 = updateApkSha256;
             post(() -> updateProgress.set(0));
-            onHost(() -> in.downloadAndInstall(candidates));
+            onHost(() -> in.downloadAndInstall(candidates, sha256));
         }
     }
 
@@ -3980,6 +3985,7 @@ public final class PlayerController {
                                     () -> {
                                         if (manual) appUpdatePromptDismissed = false;
                                         updateApkRaw = release.assetUrl();
+                                        updateApkSha256 = release.assetSha256();
                                         updateUrl = release.browserUrl();
                                         updateVersion.set(release.version());
                                         updateNotes.set(release.notes());

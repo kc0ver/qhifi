@@ -101,9 +101,12 @@ public class ReleaseUpdateCheckerTest {
     @Test
     public void stableUpdateFromRcContainsNotesAndFirstMatchingRawApk() throws Exception {
         String first = "https://github.com/TIMER-err/qplayer/releases/download/v1.9.3/first.apk";
+        String digest = "sha256:0123456789abcdef0123456789abcdef"
+                + "0123456789abcdef0123456789abcdef";
         ReleaseUpdateChecker checker = new ReleaseUpdateChecker(url ->
                 release("[null,{\"name\":\"desktop.exe\",\"browser_download_url\":\"desktop\"},"
-                        + "{\"name\":\"first.APK\",\"browser_download_url\":\"" + first + "\"},"
+                        + "{\"name\":\"first.APK\",\"browser_download_url\":\"" + first
+                        + "\",\"digest\":\"" + digest + "\"},"
                         + "{\"name\":\"second.apk\",\"browser_download_url\":\"second\"}]"));
 
         ReleaseUpdateChecker.Update update = checker.check("1.9.3-rc.2", true, null)
@@ -113,6 +116,31 @@ public class ReleaseUpdateCheckerTest {
         assertEquals("release notes", update.notes());
         assertEquals(first, update.assetUrl());
         assertEquals(first, update.browserUrl());
+        assertEquals("0123456789abcdef0123456789abcdef"
+                + "0123456789abcdef0123456789abcdef", update.assetSha256());
+    }
+
+    @Test
+    public void assetDigestIsOnlyKeptWhenItIsASha256() {
+        String hex = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assertEquals(hex.toLowerCase(), ReleaseUpdateChecker.sha256Hex("sha256:" + hex));
+        assertEquals(hex.toLowerCase(), ReleaseUpdateChecker.sha256Hex(hex));
+        assertEquals("", ReleaseUpdateChecker.sha256Hex(""));
+        assertEquals("", ReleaseUpdateChecker.sha256Hex(null));
+        assertEquals("", ReleaseUpdateChecker.sha256Hex("sha512:" + hex));
+        assertEquals("", ReleaseUpdateChecker.sha256Hex("sha256:not-hex"));
+        assertEquals("", ReleaseUpdateChecker.sha256Hex("sha256:" + hex.substring(1)));
+    }
+
+    @Test
+    public void releaseWithoutDigestStaysVerifiableByFallback() throws Exception {
+        ReleaseUpdateChecker checker = new ReleaseUpdateChecker(url -> release(
+                "[{\"name\":\"app.apk\",\"browser_download_url\":\"apk\"}]"));
+
+        ReleaseUpdateChecker.Update update = checker.check("1.9.2", false, null)
+                .orElseThrow(() -> new AssertionError("expected update"));
+
+        assertEquals("", update.assetSha256());
     }
 
     @Test

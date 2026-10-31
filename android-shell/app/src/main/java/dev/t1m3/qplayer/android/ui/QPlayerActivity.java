@@ -520,22 +520,91 @@ public final class QPlayerActivity extends Activity {
         }
     }
 
+    /** Cache location for an update package, keyed by the release asset's own file
+     *  name (e.g. QHIFI-v1.9.5-hifi.apk): a package downloaded for this release is
+     *  reused, while packages from any other release can never be mistaken for it. */
+    private java.io.File updateApkCacheFile(String[] urls) {
+        String name = "qplayer-update.apk";
+        for (String url : urls) {
+            if (url == null) continue;
+            String candidate = url.substring(url.lastIndexOf('/') + 1);
+            int query = candidate.indexOf('?');
+            if (query >= 0) candidate = candidate.substring(0, query);
+            if (candidate.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")
+                    && candidate.matches("[A-Za-z0-9._-]+")) {
+                name = candidate;
+                break;
+            }
+        }
+        return new java.io.File(
+                new java.io.File(getExternalFilesDir(null), "updates"), name);
+    }
+
+    /** True only for a complete, parseable package: a truncated download or a mirror
+     *  error page saved under an .apk name must never be reused as the cached update. */
+    private boolean isCompleteUpdateApk(java.io.File apk) {
+        return apk.isFile()
+                && getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0) != null;
+    }
+
+    /** Drop cached packages from other releases plus leftovers of failed attempts. */
+    private static void pruneUpdateCache(java.io.File dir, String keep) {
+        java.io.File[] old = dir == null ? null : dir.listFiles();
+        if (old == null) return;
+        for (java.io.File f : old) {
+            String name = f.getName();
+            if (name.equals(keep)) continue;
+            if (name.endsWith(".apk") || name.endsWith(".apk.part")) f.delete();
+        }
+    }
+
     /** Download the update APK to app storage with progress, trying each candidate url
      *  (fastest mirror first, then the direct github url) until one succeeds, then hand
-     *  it to the system package installer. Off the main thread. */
-    private void downloadAndInstallUpdate(String[] urls) {
+     *  it to the system package installer. An already downloaded package for the same
+     *  release is installed without downloading it again. The release digest, when the
+     *  GitHub API exposes one, is verified for both fresh downloads and cached copies. */
+    private void downloadAndInstallUpdate(String[] urls, String sha256) {
         new Thread(() -> {
-            java.io.File out = new java.io.File(getExternalFilesDir(null), "updates/qplayer-update.apk");
+            java.io.File out = updateApkCacheFile(urls);
+            if (isCompleteUpdateApk(out) && (sha256.isEmpty()
+                    || dev.t1m3.qplayer.util.Sha256.matches(out, sha256))) {
+                dev.t1m3.qplayer.util.Logger.info(
+                        "reusing downloaded update apk: {}", out.getName());
+                controller.setUpdateProgress(100);
+                runOnUiThread(() -> installApk(out));
+                return;
+            }
             java.io.File dir = out.getParentFile();
             if (dir != null) dir.mkdirs();
+            pruneUpdateCache(dir, out.getName());
+            // Download into a .part sidecar and rename only on success, so an
+            // interrupted attempt can never masquerade as a cached package.
+            java.io.File part = new java.io.File(dir, out.getName() + ".part");
             for (String url : urls) {
-                if (downloadOne(url, out)) {
+                if (downloadOne(url, part)) {
+                    if (!isCompleteUpdateApk(part)) {
+                        dev.t1m3.qplayer.util.Logger.warn(
+                                "downloaded update is not a valid apk: {}", url);
+                        continue;
+                    }
+                    if (!sha256.isEmpty() && !dev.t1m3.qplayer.util.Sha256.matches(part, sha256)) {
+                        dev.t1m3.qplayer.util.Logger.warn(
+                                "downloaded update checksum mismatch: {}", url);
+                        continue;
+                    }
+                    out.delete();
+                    if (!part.renameTo(out)) {
+                        dev.t1m3.qplayer.util.Logger.warn(
+                                "update apk rename failed: {}", part.getName());
+                        continue;
+                    }
                     controller.setUpdateProgress(100);
                     runOnUiThread(() -> installApk(out));
                     return;
                 }
                 dev.t1m3.qplayer.util.Logger.warn("update source failed, trying next: {}", url);
             }
+            part.delete();
             controller.setUpdateProgress(-2);
         }, "qplayer-update-dl").start();
     }
@@ -570,6 +639,11 @@ public final class QPlayerActivity extends Activity {
                         }
                     }
                 }
+            }
+            if (total > 0 && out.length() != total) {
+                dev.t1m3.qplayer.util.Logger.warn(
+                        "update download truncated: {} bytes of {}", out.length(), total);
+                return false;
             }
             return out.length() > 0;
         } catch (Throwable e) {

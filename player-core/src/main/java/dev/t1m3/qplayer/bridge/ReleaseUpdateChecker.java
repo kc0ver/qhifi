@@ -47,12 +47,15 @@ public final class ReleaseUpdateChecker {
         private final String notes;
         private final String assetUrl;
         private final String browserUrl;
+        private final String assetSha256;
 
-        public Update(String version, String notes, String assetUrl, String browserUrl) {
+        public Update(String version, String notes, String assetUrl, String browserUrl,
+                      String assetSha256) {
             this.version = version;
             this.notes = notes;
             this.assetUrl = assetUrl;
             this.browserUrl = browserUrl;
+            this.assetSha256 = assetSha256;
         }
 
         public String version() {
@@ -69,6 +72,12 @@ public final class ReleaseUpdateChecker {
 
         public String browserUrl() {
             return browserUrl;
+        }
+
+        /** Lowercase hex SHA-256 of the matched asset, or "" when the release API
+         *  exposes no sha256 digest (hosts then fall back to plain downloading). */
+        public String assetSha256() {
+            return assetSha256;
         }
     }
 
@@ -124,18 +133,35 @@ public final class ReleaseUpdateChecker {
 
         Predicate<String> matcher = assetMatcher != null ? assetMatcher : APK_MATCHER;
         String assetUrl = "";
+        String assetSha256 = "";
         if (release.has("assets") && release.get("assets").isJsonArray()) {
             for (JsonElement element : release.getAsJsonArray("assets")) {
                 if (!element.isJsonObject()) continue;
                 JsonObject asset = element.getAsJsonObject();
                 if (matcher.test(optString(asset, "name"))) {
                     assetUrl = optString(asset, "browser_download_url");
+                    assetSha256 = sha256Hex(optString(asset, "digest"));
                     break;
                 }
             }
         }
         String browserUrl = assetUrl.isEmpty() ? optString(release, "html_url") : assetUrl;
-        return Optional.of(new Update(latest, optString(release, "body"), assetUrl, browserUrl));
+        return Optional.of(
+                new Update(latest, optString(release, "body"), assetUrl, browserUrl, assetSha256));
+    }
+
+    /** GitHub reports an asset digest as "sha256:<hex>"; keep the bare lowercase hex.
+     *  Anything absent or of another algorithm yields "" so hosts just don't verify. */
+    static String sha256Hex(String digest) {
+        if (digest == null) return "";
+        String value = digest.trim();
+        int colon = value.indexOf(':');
+        if (colon >= 0) {
+            if (!"sha256".equalsIgnoreCase(value.substring(0, colon))) return "";
+            value = value.substring(colon + 1);
+        }
+        if (!value.matches("[0-9A-Fa-f]{64}")) return "";
+        return value.toLowerCase(Locale.ROOT);
     }
 
     /** An invalid successful response must fall back just like a failed request. */

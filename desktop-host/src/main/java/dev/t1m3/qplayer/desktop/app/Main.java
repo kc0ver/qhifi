@@ -26,6 +26,7 @@ import dev.t1m3.qplayer.settings.SettingsCatalog;
 import dev.t1m3.qplayer.settings.SettingsCore;
 import dev.t1m3.qplayer.store.AppDirs;
 import dev.t1m3.qplayer.util.Logger;
+import dev.t1m3.qplayer.util.Sha256;
 import com.sun.jna.WString;
 import com.sun.jna.platform.win32.Shell32;
 import org.jetbrains.annotations.NotNull;
@@ -203,7 +204,8 @@ public final class Main {
             if (os.contains("mac")) return n.endsWith(".dmg");
             return n.endsWith(".appimage");
         });
-        controller.setInstaller(urls -> downloadAndInstallUpdate(controller, window, urls));
+        controller.setInstaller(
+                (urls, sha256) -> downloadAndInstallUpdate(controller, window, urls, sha256));
 
         TrayController tray = new TrayController(controller, window, resources.load("app-icon.png"));
         // AppKit can decode SVG data directly. Keeping the status-item artwork
@@ -447,37 +449,72 @@ public final class Main {
      *  the cache folder (not a temp dir — same place audio/cover caching already
      *  lives, so it's covered by the existing cache-size/clear-cache settings) and
      *  hand off to the OS to actually install it, mirroring how the Android side
-     *  hands a downloaded APK to the system package installer. */
+     *  hands a downloaded APK to the system package installer. A cached package for
+     *  the same release is reused, and the release digest (when available) is
+     *  verified for both fresh downloads and cached copies. */
     private static void downloadAndInstallUpdate(PlayerController controller,
                                                  DesktopWindow window,
-                                                 String[] urls) {
+                                                 String[] urls,
+                                                 String sha256) {
         new Thread(() -> {
             String name = urls.length > 0 ? fileNameOf(urls[0]) : "qplayer-update";
             File dir = AppDirs.updatesDir().toFile();
             dir.mkdirs();
             File out = new File(dir, name);
-            for (String url : urls) {
-                if (downloadOne(url, out, controller)) {
-                    out.setExecutable(true, false);
-                    controller.setUpdateProgress(100);
-                    InstallerLaunch launch = launchInstaller(out);
-                    if (!launch.started()) {
-                        controller.setUpdateProgress(-2);
-                    } else if (launch.requiresAppExit()) {
-                        // Only quit after ProcessBuilder has successfully created
-                        // the independent installer process. Use the normal main-
-                        // loop shutdown path so playback, tray, GPU and settings
-                        // resources are released before the installer replaces
-                        // files from the current installation.
-                        Logger.info("update installer started; shutting down QPlayer");
-                        window.postMainTask(window::requestQuit);
-                    }
-                    return;
-                }
-                Logger.warn("update source failed, trying next: {}", url);
+            if (isCachedUpdate(out, sha256)) {
+                Logger.info("reusing downloaded update: {}", out.getName());
+                launchUpdateInstaller(controller, window, out);
+                return;
             }
+            // Download into a .part sidecar and rename only once verified, so an
+            // interrupted attempt can never masquerade as a cached package.
+            File part = new File(dir, name + ".part");
+            for (String url : urls) {
+                if (!downloadOne(url, part, controller)) {
+                    Logger.warn("update source failed, trying next: {}", url);
+                    continue;
+                }
+                if (!sha256.isEmpty() && !Sha256.matches(part, sha256)) {
+                    Logger.warn("downloaded update checksum mismatch: {}", url);
+                    continue;
+                }
+                out.delete();
+                if (!part.renameTo(out)) {
+                    Logger.warn("update rename failed: {}", part.getName());
+                    continue;
+                }
+                launchUpdateInstaller(controller, window, out);
+                return;
+            }
+            part.delete();
             controller.setUpdateProgress(-2);
         }, "qplayer-update-dl").start();
+    }
+
+    /** True when a previous download is complete and matches the release digest. */
+    private static boolean isCachedUpdate(File out, String sha256) {
+        if (!out.isFile() || out.length() <= 0) return false;
+        return sha256.isEmpty() || Sha256.matches(out, sha256);
+    }
+
+    /** Launch a verified package and follow through with the app's own shutdown when
+     *  the installer needs the current installation out of the way. */
+    private static void launchUpdateInstaller(PlayerController controller,
+                                              DesktopWindow window,
+                                              File out) {
+        out.setExecutable(true, false);
+        controller.setUpdateProgress(100);
+        InstallerLaunch launch = launchInstaller(out);
+        if (!launch.started()) {
+            controller.setUpdateProgress(-2);
+        } else if (launch.requiresAppExit()) {
+            // Only quit after ProcessBuilder has successfully created the
+            // independent installer process. Use the normal main-loop shutdown
+            // path so playback, tray, GPU and settings resources are released
+            // before the installer replaces files from the current installation.
+            Logger.info("update installer started; shutting down QPlayer");
+            window.postMainTask(window::requestQuit);
+        }
     }
 
     private static String fileNameOf(String url) {
