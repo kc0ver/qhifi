@@ -1,27 +1,40 @@
 name: Release
 
-# Release pipeline for a signed Android release APK. The job attaches it to the
-# GitHub Release for the tag (action-gh-release creates the release on first
-# upload and appends after).
+# Release pipeline for a signed Android release APK.
 #
 # QHIFI maintains Android only, so the upstream desktop packaging jobs (Linux
 # AppImage / Windows installer / macOS dmg) were removed: they failed on two of
 # the three runners and, with no desktop build of this fork to ship, only spent
 # runner time. The upstream shared `tests` job is likewise not wired in: it runs
-# the desktop-host suite, which this fork does not ship.
+# the desktop-host suite, which this fork does not ship (that suite still runs
+# from tests.yml on every push to master as a merge-regression gate).
+#
+# Following upstream's layout, the build job only uploads a workflow artifact and
+# a single `publish` job attaches it to the GitHub Release once the build
+# succeeded, so a tag never becomes visible with a missing/broken APK.
 #
 # Triggers on BOTH ways of cutting a release, so either works:
 #   • `git push` of a `v*` tag           → push event
 #   • "Publish release" in the GitHub UI → release:published event
 # (a UI-created release does not reliably emit a tag push event, so we need both).
-# A manual `workflow_dispatch` run skips the release and uploads artifacts only.
+# A manual `workflow_dispatch` run uploads artifacts only, unless `release_tag` is
+# given: it then creates that tag at the run's commit and publishes there. Its
+# tag is created with GITHUB_TOKEN, so it does not trigger a second full run.
 
 on:
   push:
     tags: ['v*']
   release:
     types: [published]
-  workflow_dispatch:      # manual run: build + upload the artifact only, no release
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Publish the built APK as this release tag (created at the run's
+          commit), e.g. a prerelease. Empty uploads artifacts only.
+        required: false
+        default: ''
+        type: string
 
 # Push-a-tag and publish-a-release can both fire for the same version; collapse
 # them into one run per ref instead of building everything twice.
@@ -49,12 +62,14 @@ jobs:
 
       # Explicit Maven cache (the qml4j source build + player-core install + their
       # deps land in ~/.m2). setup-gradle below handles the Gradle caches itself.
+      # Keyed per job like upstream, so a future job sharing this cache cannot
+      # race to save it and leave the loser's dependencies uncached.
       - name: Cache Maven repository
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2-
+          key: ${{ runner.os }}-m2-android-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-android-
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -86,9 +101,9 @@ jobs:
 
       - name: Stage APK
         # The file carries the release tag so a downloaded APK identifies itself;
-        # a manual dispatch has no tag and falls back to the branch name.
+        # a manual dispatch without release_tag falls back to the branch name.
         env:
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
         run: |
           mkdir -p out
           dir=android-shell/app/build/outputs/apk/release
@@ -102,20 +117,43 @@ jobs:
           name: QHIFI-android
           path: out/*
 
+  publish:
+    needs: [android]
+    # github.ref is unreliable for release:published when the tag is auto-created
+    # from the UI (lands as refs/heads/master instead of refs/tags/<tag>), so check
+    # the event name and pass the release tag explicitly. A manual run publishes
+    # only when given a release_tag.
+    if: >-
+      !cancelled()
+      && needs.android.result == 'success'
+      && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+          || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: QHIFI-*
+          path: out
+          merge-multiple: true
+
+      - name: Check the expected APK is present
+        run: |
+          ls -l out
+          [ -s "out/QHIFI-${RELEASE_TAG}.apk" ] || { echo "::error::missing QHIFI-${RELEASE_TAG}.apk"; exit 1; }
+
       - name: Attach to release
-        # github.ref is unreliable for release:published when the tag is auto-created
-        # from the UI (lands as refs/heads/master instead of refs/tags/<tag>), so check
-        # the event name and pass the release tag explicitly.
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: out/*
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           # Only upstream-style prerelease tags are marked as such. Every QHIFI
           # tag carries the "-hifi" suffix, so matching any '-' would mark stable
           # releases prerelease and hide them from releases/latest (the app's
           # update check reads that endpoint).
-          prerelease: ${{ contains(github.event.release.tag_name || github.ref_name, '-rc.') || contains(github.event.release.tag_name || github.ref_name, '-alpha') || contains(github.event.release.tag_name || github.ref_name, '-beta') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-rc.') || contains(env.RELEASE_TAG, '-alpha') || contains(env.RELEASE_TAG, '-beta') }}
           # Curated notes live beside the workflow; update them before each release.
           body_path: ${{ github.workspace }}/.github/release-notes.md
 
@@ -123,8 +161,6 @@ jobs:
       # the old body in place even with body_path set; write the curated notes
       # once more after the upload so the published body always matches the tag.
       - name: Sync release notes
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
-        run: gh release edit "$TAG" --notes-file .github/release-notes.md
+        run: gh release edit "$RELEASE_TAG" --notes-file .github/release-notes.md

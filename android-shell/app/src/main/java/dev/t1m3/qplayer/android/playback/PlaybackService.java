@@ -184,7 +184,9 @@ public final class PlaybackService extends Service {
                 PlayerController c = controller;
                 if (c != null && c.isPlaying()) {
                     Logger.info("audio becoming noisy (jack pulled); pausing");
-                    c.mediaPause();
+                    // No fade: the system has already rerouted to the speaker, so
+                    // fading out would play the tail of the song out loud.
+                    c.pauseForOutputLoss();
                 }
             }
         };
