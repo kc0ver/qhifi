@@ -132,6 +132,10 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
     steps:
+      # The curated notes live in the repo, and both body_path and the sync step
+      # below read them from the workspace.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: QHIFI-*
