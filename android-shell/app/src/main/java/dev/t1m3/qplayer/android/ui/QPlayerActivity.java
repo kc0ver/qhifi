@@ -419,6 +419,10 @@ public final class QPlayerActivity extends Activity {
                 ((dev.t1m3.qplayer.android.app.QPlayerApplication) app).sceneResources();
         try {
             if (!lyricFontsInitialized) {
+                // Trial build: the APK no longer packages the PingFang faces, so
+                // "bundled" must resolve to the system CJK font instead of a
+                // glyph-less default face.
+                dev.t1m3.qplayer.lyric.skia.Fonts.setBundledAvailable(hasBundledPingFang(app));
                 dev.t1m3.qplayer.lyric.skia.Fonts.init(weight -> CompressedResources.load(resources,
                         "fonts/PingFangSC-" + bundledFontWeightName(weight) + ".otf"));
                 dev.t1m3.qplayer.lyric.skia.Fonts.initIcon(
@@ -507,6 +511,25 @@ public final class QPlayerActivity extends Activity {
         }
         glView.dispatchTouchEvent(android.view.MotionEvent.obtain(
                 down, down + 180L, android.view.MotionEvent.ACTION_UP, x, y1, 0));
+    }
+
+    /** Whether the APK still ships a bundled PingFang face. Listing the asset
+     *  directory is cheap; decompressing a 7 MiB face just to answer this is not. */
+    private static boolean hasBundledPingFang(Context app) {
+        try {
+            String[] files = app.getAssets().list("fonts");
+            if (files != null) {
+                for (String name : files) {
+                    if (name != null && name.startsWith("PingFangSC-")
+                            && name.endsWith(".otf.xz")) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Unreadable asset list: treat as absent, the system font is the safer default.
+        }
+        return false;
     }
 
     private static String bundledFontWeightName(

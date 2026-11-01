@@ -52,6 +52,9 @@ Item {
             }
             SuperArrow {
                 Layout.fillWidth: true
+                // Trial builds ship no bundled face; the system font then owns the
+                // empty selection, so offering "bundled" here would be a dead entry.
+                visible: settings.isBundledFontAvailable()
                 title: i18n.t("font.picker.bundled")
                 indicator: control.current === control.bundledValue ? "check" : "chevron_right"
                 onClicked: { control.choose(control.bundledValue); picker.close() }
@@ -59,7 +62,10 @@ Item {
             SuperArrow {
                 Layout.fillWidth: true
                 title: i18n.t("font.picker.system")
-                indicator: control.current === "system" ? "check" : "chevron_right"
+                indicator: control.current === "system"
+                           || (!settings.isBundledFontAvailable()
+                               && control.current === control.bundledValue)
+                           ? "check" : "chevron_right"
                 onClicked: { control.choose("system"); picker.close() }
             }
             SuperArrow {

@@ -56,6 +56,11 @@ public final class Fonts {
     // selected by the user is parsed, instead of all four PingFang files at startup.
     private static final Typeface[] bundledFaces = new Typeface[Weight.values().length];
     private static BundledFontLoader bundledLoader;
+    // Whether a bundled face is actually shipped. A host that no longer packages
+    // one clears this at startup, which turns the empty selection (normally
+    // "bundled") into the platform's default CJK font instead of a bare
+    // `new Font()` — Roboto on Android, which has no CJK glyphs at all.
+    private static boolean bundledAvailable = true;
     // Null/empty = bundled PingFang SC, SYSTEM = the OS default UI font, anything
     // else = that installed family. One value instead of the old
     // useSystemFont + customFamily pair, whose precedence ("custom wins unless it
@@ -349,6 +354,32 @@ public final class Fonts {
         }
     }
 
+    /**
+     * Declare whether this host actually ships {@link #init}'s bundled faces.
+     *
+     * <p>When false, the empty selection — normally "the bundled font" — resolves
+     * to the platform's default CJK font instead. Hosts that ship no bundled font
+     * call this once at startup. Safe to call before or after {@link #init}.
+     */
+    public static void setBundledAvailable(boolean available) {
+        synchronized (LOCK) {
+            bundledAvailable = available;
+            if (!available) {
+                java.util.Arrays.fill(bundledFaces, null);
+                familyFaces.clear();
+                familyFonts.clear();
+            }
+            reapply();
+        }
+    }
+
+    /** Whether the bundled faces are actually shipped by this host. The picker
+     *  hides the "bundled" source and the settings row relabels the empty
+     *  selection when this is false. */
+    public static boolean isBundledAvailable() {
+        return bundledAvailable;
+    }
+
     /** Load already supplied bundled weights without retaining their byte arrays.
      *  Kept for embedders using the original API; QPlayer's hosts use the lazy form. */
     public static void init(byte[] thin, byte[] light, byte[] regular, byte[] medium) {
@@ -422,18 +453,23 @@ public final class Fonts {
 
     private static void reapply() {
         FontMgr mgr = FontMgr.getDefault();
-        if (selection != null && mgr != null) {
+        // With no bundled face shipped, the empty selection has to mean the
+        // platform's default CJK font: falling through to bundledFaces below
+        // would hand every caller a face-less `new Font()`.
+        String effective = selection;
+        if (effective == null && !bundledAvailable) effective = SYSTEM;
+        if (effective != null && mgr != null) {
             Typeface base;
-            if (SYSTEM.equals(selection)) {
+            if (SYSTEM.equals(effective)) {
                 base = systemDefaultFace(mgr);
             } else {
-                base = mgr.matchFamilyStyle(selection, FontStyle.NORMAL);
+                base = mgr.matchFamilyStyle(effective, FontStyle.NORMAL);
                 // matchFamilyStyle answers with the closest face it has rather
                 // than nothing, so a family only the host's file index knows
                 // about comes back as some unrelated face (Roboto on Android).
                 // Trust the name, not the non-null.
-                if (!isFamily(base, selection)) {
-                    Typeface fromFile = indexFace(selection, WEIGHT_VALUES[Weight.REGULAR.ordinal()]);
+                if (!isFamily(base, effective)) {
+                    Typeface fromFile = indexFace(effective, WEIGHT_VALUES[Weight.REGULAR.ordinal()]);
                     if (fromFile != null) base = fromFile;
                 }
             }
@@ -441,7 +477,7 @@ public final class Fonts {
             // systemDefaultFace); a custom family that fails to resolve at all
             // (uninstalled, renamed) leaves it null. Either way fall through to
             // the bundled faces rather than leaving faces on a stale typeface.
-            String family = base != null ? familyNameOf(base, selection) : null;
+            String family = base != null ? familyNameOf(base, effective) : null;
             if (base != null && applyFamilyFaces(mgr, family, base)) {
                 activeFamily = family;
                 onFacesChanged();
@@ -607,6 +643,7 @@ public final class Fonts {
     }
 
     private static Typeface bundledFace(Weight weight) {
+        if (!bundledAvailable) return null;
         int index = weight.ordinal();
         Typeface face = bundledFaces[index];
         if (face != null || bundledLoader == null) return face;

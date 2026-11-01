@@ -645,18 +645,22 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                     // DesktopWindow.loadFonts does via the registry/fontconfig. This
                     // is read once per view, hence Settings' "restart to apply".
                     SettingsCore s = settings;
-                    // Only a non-bundled selection needs the index, and only then
-                    // is it worth waiting for: the scan runs on a background
-                    // thread started at Activity create, and blocking here on the
-                    // default font would put its cost straight into cold start.
-                    if (s != null && !s.fontSelectionOf("").isEmpty()) {
+                    // A non-bundled selection needs the index, and so does the
+                    // default selection once no bundled face is shipped — its
+                    // system font still has to be found as a FILE for qml4j.
+                    // Otherwise the wait would put the scan's cost into cold start
+                    // for a font the bundled assets already cover.
+                    boolean needsIndex = s != null
+                            && (!s.fontSelectionOf("").isEmpty()
+                                || !dev.t1m3.qplayer.lyric.skia.Fonts.isBundledAvailable());
+                    if (needsIndex) {
                         AndroidFontIndex.instance().awaitReady(3000);
                         // The selection was first resolved before the index had
                         // been populated; redo it now that the files are known.
                         dev.t1m3.qplayer.lyric.skia.Fonts.reloadFileIndex();
-                        reg = dev.t1m3.qplayer.lyric.skia.Fonts.activeFamilyFile(400);
-                        med = dev.t1m3.qplayer.lyric.skia.Fonts.activeFamilyFile(700);
                     }
+                    reg = dev.t1m3.qplayer.lyric.skia.Fonts.activeFamilyFile(400);
+                    med = dev.t1m3.qplayer.lyric.skia.Fonts.activeFamilyFile(700);
                     if (reg == null) reg = CompressedResources.load(resources, "fonts/PingFangSC-Regular.otf");
                     if (med == null) med = CompressedResources.load(resources, "fonts/PingFangSC-Medium.otf");
                     if (reg != null || med != null) view.uiTypefaces(reg, med);

@@ -728,14 +728,24 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         return fontSelection();
     }
 
+    /** Whether this build ships the bundled PingFang faces. Read by the picker to
+     *  hide that source (the system font then stands in for the empty selection). */
+    public boolean isBundledFontAvailable() {
+        return Fonts.isBundledAvailable();
+    }
+
     /** The font row's action and live text: core-owned (the selection lives in
      *  the store, not in a catalog row), so neither host has to wire them. A host
      *  may still override either by registering the same id first. */
     private void registerFontProviders() {
         infos.putIfAbsent("fontName", () -> {
             String sel = fontFamily();
-            if (sel.isEmpty()) return I18n.tr("settings.font.current",
-                    I18n.tr("font.picker.bundled"));
+            if (sel.isEmpty()) {
+                // The empty selection means "bundled", except in a build that ships
+                // no bundled face — there it resolves to the system font.
+                return I18n.tr("settings.font.current", I18n.tr(!Fonts.isBundledAvailable()
+                        ? "font.picker.system" : "font.picker.bundled"));
+            }
             if (Fonts.SYSTEM.equals(sel)) return I18n.tr("settings.font.current",
                     I18n.tr("font.picker.system"));
             return I18n.tr("settings.font.current", sel);

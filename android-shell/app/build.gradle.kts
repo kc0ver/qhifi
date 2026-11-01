@@ -145,6 +145,10 @@ val qmlRuntimeAssets = layout.buildDirectory.dir("qml-aot/assets")
 val stageQmlRuntimeAssets by tasks.registering(Sync::class) {
     from("${rootDir}/../shared-qml") {
         exclude("**/*.qml", "**/qmldir")
+        // Trial build: the PingFang faces are no longer packaged, so the app
+        // starts on the system CJK font. The sources stay in the tree until the
+        // download path replaces them.
+        exclude("fonts/PingFangSC-*")
     }
     into(qmlRuntimeAssets)
 }
