@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-// One version source for Maven, Android, and the source-build CI recipe.
+// One engine version source for Maven, Android, and CI.
 val qplayerPom = javax.xml.parsers.DocumentBuilderFactory.newInstance()
     .newDocumentBuilder().parse(file("${rootDir}/../pom.xml"))
 val qml4jVersion = qplayerPom.getElementsByTagName("qml4j.version").item(0).textContent.trim()
@@ -18,11 +18,11 @@ android {
         applicationId = "com.kc0ver.qhifi"
         minSdk = 26
         targetSdk = 34
-        versionCode = 104
+        versionCode = 105
         // Tracks the upstream release it is built from, marked as the fork build
-        // ("1.9.5" → "1.9.5-hifi"). The update check ignores the suffix,
+        // ("1.9.6" → "1.9.6-hifi"). The update check ignores the suffix,
         // so a release of this fork is only "newer" once its numeric part is.
-        versionName = "1.9.5-hifi"
+        versionName = "1.9.6-hifi"
         manifestPlaceholders["appLabel"] = "QHIFI"
         // The exclusive USB driver is a native .so; the app is already arm64
         // in practice (the bundled Skija library is), so the native build
@@ -186,7 +186,7 @@ dependencies {
         .builtBy(generateBundledQml))
 
     // The RECODE refactor merged parser/engine/compiler/render into one module.
-    implementation("io.github.timer-err:qml4j-core:$qml4jVersion")
+    implementation("com.github.TIMER-err.qml4j:qml4j-core:$qml4jVersion")
 
     // Our platform-neutral player core (netease + lyrics + audio abstraction +
     // QML bridge). Pulls gson + zxing-core transitively; all Android-dexable.

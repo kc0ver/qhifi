@@ -60,7 +60,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # Explicit Maven cache (the qml4j source build + player-core install + their
+      # Explicit Maven cache (the JitPack engine artifacts + player-core install +
       # deps land in ~/.m2). setup-gradle below handles the Gradle caches itself.
       # Keyed per job like upstream, so a future job sharing this cache cannot
       # race to save it and leave the loser's dependencies uncached.
@@ -72,8 +72,6 @@ jobs:
           restore-keys: ${{ runner.os }}-m2-android-
 
       - uses: gradle/actions/setup-gradle@v5
-
-      - uses: ./.github/actions/build-engine
 
       # player-core now carries the host-drawn lyric classes (shared-lyric was
       # merged in), so installing it is enough for the gradle build to resolve.

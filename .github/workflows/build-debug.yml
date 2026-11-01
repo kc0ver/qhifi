@@ -29,8 +29,6 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v5
 
-      - uses: ./.github/actions/build-engine
-
       - name: Install player-core
         run: |
           mvn -B -N install
