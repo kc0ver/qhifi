@@ -93,7 +93,19 @@ android {
         resources.excludes += setOf(
             "META-INF/AL2.0",
             "META-INF/LGPL2.1",
-            "META-INF/*.kotlin_module"
+            "META-INF/*.kotlin_module",
+            // qml4j uses ICU only for Unicode line breaking (UnicodeBreaks), whose
+            // rules live in brkitr. The collation/locale/formatting data that
+            // icu4j ships for its own API surface is ~8 MiB of dead weight here.
+            "com/ibm/icu/impl/data/icudata/lang/**",
+            "com/ibm/icu/impl/data/icudata/coll/**",
+            "com/ibm/icu/impl/data/icudata/zone/**",
+            "com/ibm/icu/impl/data/icudata/curr/**",
+            "com/ibm/icu/impl/data/icudata/unit/**",
+            "com/ibm/icu/impl/data/icudata/region/**",
+            "com/ibm/icu/impl/data/icudata/translit/**",
+            "com/ibm/icu/impl/data/icudata/rbnf/**",
+            "com/ibm/icu/impl/data/icudata/unames.icu"
         )
         jniLibs.useLegacyPackaging = true
     }
