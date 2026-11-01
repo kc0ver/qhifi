@@ -20,9 +20,9 @@ android {
         targetSdk = 34
         versionCode = 106
         // Tracks the upstream release it is built from, marked as the fork build
-        // ("1.9.7" → "1.9.7-hifi"). The update check ignores the suffix,
+        // ("1.9.7-rc.1" → "1.9.7-rc.1-hifi"). The update check ignores the suffix,
         // so a release of this fork is only "newer" once its numeric part is.
-        versionName = "1.9.7-hifi"
+        versionName = "1.9.7-rc.1-hifi"
         manifestPlaceholders["appLabel"] = "QHIFI"
         // The exclusive USB driver is a native .so; the app is already arm64
         // in practice (the bundled Skija library is), so the native build
