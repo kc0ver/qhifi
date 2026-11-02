@@ -19,6 +19,9 @@ Rectangle {
     property bool loginOpen: false
     property bool showLog: false
     property bool volumeOpen: false
+    // 独占模式不使用框架路线的软件衰减音量条，开关打开时收起残留的弹窗。
+    property bool hifiWatch: player.hifiEnabled
+    onHifiWatchChanged: if (player.hifiEnabled) app.volumeOpen = false
     property bool sleepTimerOpen: false
     // Full-screen destinations share one navigation stack. Each drill-in keeps
     // its source underneath, so queue -> artist -> back restores the queue. Artist
@@ -548,7 +551,8 @@ Rectangle {
             }
             IconButton {
                 objectName: "mobileVolumeAction"
-                visible: !settings.has("desktopLyricEnabled")
+                // 独占模式下音量由 HUD 与独占路线负责，这里不再暴露软件衰减入口。
+                visible: !settings.has("desktopLyricEnabled") && !player.hifiEnabled
                 type: "standard"
                 icon: settings.appVolume === 0 ? "volume_off"
                       : (settings.appVolume < 50 ? "volume_down" : "volume_up")
@@ -908,7 +912,7 @@ Rectangle {
     }
 
     VolumeDialog {
-        active: app.volumeOpen
+        active: app.volumeOpen && !player.hifiEnabled
         onClosed: app.volumeOpen = false
     }
 
