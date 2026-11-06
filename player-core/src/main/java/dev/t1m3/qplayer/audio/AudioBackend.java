@@ -39,6 +39,16 @@ public interface AudioBackend {
     /** Current play head in milliseconds (song time, seek-relative). */
     long position();
 
+    /**
+     * How far the sound being heard trails {@link #position()}: audio already
+     * decoded and queued in the output stage that the device has not played yet.
+     * A backend that streams straight to the platform sink reports 0; the USB
+     * exclusive path keeps a deep ring plus in-flight URBs (~0.9 s) and reports
+     * that depth, so UI clocks can follow the audible head instead of the
+     * decoder's write head.
+     */
+    default long outputLatencyMs() { return 0L; }
+
     /** Duration of the current source in ms, or 0 if unknown. */
     long duration();
 

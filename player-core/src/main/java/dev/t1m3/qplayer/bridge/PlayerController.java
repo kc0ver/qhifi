@@ -3416,7 +3416,7 @@ public final class PlayerController {
         if (now - lastPositionPush >= 200L) {
             lastPositionPush = now;
             if (backend.isPlaying()) {
-                long pos = backend.position();
+                long pos = audiblePosition();
                 positionMs.set(pos);
                 updateLyricIndex(pos - LyricConfig.instance.offsetMs.getValue());
             }
@@ -6562,6 +6562,18 @@ public final class PlayerController {
     }
 
     /**
+     * The head the listener actually hears: the backend's play head minus the
+     * audio still queued in its output stage. Lyrics, progress and the media
+     * session must follow this one; the raw {@link #position()} counts the
+     * decoder's write head, which in the USB exclusive path runs ~0.9 s ahead
+     * of the sound (ring plus in-flight URBs).
+     */
+    private long audiblePosition() {
+        long pos = backend.position() - backend.outputLatencyMs();
+        return pos > 0L ? pos : 0L;
+    }
+
+    /**
      * True only while song time should advance visually. Unlike {@link #isPlaying()}, this stays
      * false during async source loading. During a manual fade-out it stays true until the backend
      * really pauses, keeping lyrics aligned with audible audio.
@@ -6580,7 +6592,7 @@ public final class PlayerController {
     public long lyricClockPosition() {
         synchronized (QmlRuntimeLock.MONITOR) {
             return playbackStarted
-                    ? Math.max(0L, backend.position())
+                    ? audiblePosition()
                     : Math.max(0L, stoppedLyricPositionMs);
         }
     }
@@ -6609,7 +6621,7 @@ public final class PlayerController {
                     return Math.max(0L, pendingResumeMs);
                 return Math.max(0L, stoppedLyricPositionMs);
             }
-            long live = Math.max(0L, backend.position());
+            long live = audiblePosition();
             if (playbackStarted || backend.isPlaying() || live > 0L) return live;
             return Math.max(0L, stoppedLyricPositionMs);
         }

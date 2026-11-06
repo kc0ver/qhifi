@@ -528,6 +528,11 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     }
 
     @Override
+    public long outputLatencyMs() {
+        return active.outputLatencyMs();
+    }
+
+    @Override
     public long duration() {
         return active.duration();
     }

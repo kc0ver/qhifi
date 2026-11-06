@@ -474,6 +474,30 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
     }
 
+    /**
+     * Everything the decoder has queued that the DAC has not played yet — the
+     * ring plus in-flight URBs. position() counts it as already played (it is
+     * the write head), so UI clocks subtract this to stay on the audible head
+     * instead of running ~0.9 s ahead of the sound.
+     */
+    @Override
+    public long outputLatencyMs() {
+        synchronized (lock) {
+            // End of stream pins the position pair to the duration while the
+            // ring still drains; subtracting there would walk the display
+            // backwards, so the tail reports no latency.
+            if (!opened || (durationMs > 0L && positionBaseMs >= durationMs)) return 0L;
+            int rate = outputRate > 0 ? outputRate : sink.sampleRate();
+            if (rate <= 0) return 0L;
+            // Never subtract more than what has been written since the current
+            // time base: right after a seek or a track start the ring still
+            // holds the old audio, and without this the display would jump
+            // before the target (or behind zero) instead of staying put.
+            long writtenMs = Math.max(0L, sink.framesWritten() - positionBaseFrames) * 1000L / rate;
+            return Math.min(bufferedMs(), writtenMs);
+        }
+    }
+
     @Override
     public long duration() {
         synchronized (lock) {
@@ -481,7 +505,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         }
     }
 
-    /** Ring depth right now (queued + in-flight), in ms — diagnostics only. */
+    /** Ring depth right now (queued + in-flight), in ms. */
     private long bufferedMs() {
         synchronized (lock) {
             int rate = outputRate > 0 ? outputRate : sink.sampleRate();

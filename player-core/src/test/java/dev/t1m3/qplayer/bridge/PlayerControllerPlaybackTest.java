@@ -291,6 +291,14 @@ public class PlayerControllerPlaybackTest {
             backend.fireStarted();
             assertTrue(controller.isLyricClockRunning());
 
+            // A backend with a deep output queue (the USB exclusive path) keeps
+            // audio the decoder already wrote out of the audible head; the lyric
+            // clock must follow the audible one, not the write head.
+            backend.outputLatency = 900L;
+            backend.position = 4100L;
+            assertEquals(3200L, controller.lyricClockPosition());
+            backend.outputLatency = 0L;
+
             backend.position = 3210L;
             controller.toggle();
             // The pause button starts an audible fade-out. The backend is still
@@ -786,6 +794,7 @@ public class PlayerControllerPlaybackTest {
         volatile int volumeWrites;
 
         volatile String lastSource;
+        volatile long outputLatency;
 
         @Override public void play(String source, long startMs) {
             playCalls++;
@@ -804,6 +813,7 @@ public class PlayerControllerPlaybackTest {
         @Override public boolean isPlaying() { return playing; }
         @Override public void seek(long ms) { position = ms; }
         @Override public long position() { return position; }
+        @Override public long outputLatencyMs() { return outputLatency; }
         @Override public long duration() { return 120000L; }
         @Override public void setVolume(float volume) {
             this.volume = volume;
