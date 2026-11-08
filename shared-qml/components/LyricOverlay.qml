@@ -29,6 +29,7 @@ Item {
     // Playback-info card (AudioChainDialog.qml): the second local panel, same top
     // corner family as the offset panel and mutually exclusive with it.
     property bool chainPanelOpen: false
+
     // Top row inset for the four title buttons. Desktop overrides this to 6
     // (Main.qml hides the custom title bar while the lyric page is open, so the
     // buttons sit flush at the very top of the window); mobile keeps the status
@@ -82,6 +83,10 @@ Item {
 
     // Swallow taps on the empty (lyrics) area so they don't leak through.
     MouseArea { anchors.fill: parent }
+
+    // Fun-lab decorations (wooden cabinet, tube glow, VU pair), toggled from the
+    // lab sheet on the settings page.
+    FunLyricChrome { objectName: "lyricFunChrome"; anchors.fill: parent }
 
     // --- portrait: big centred cover for no-lyric / instrumental tracks. It zooms +
     // fades in/out on the lyrics↔cover switch (SPlayer's zoom transition) — no big/small

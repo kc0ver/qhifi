@@ -17,6 +17,7 @@ import "../components"
 Rectangle {
     id: page
     property real bottomContentInset: 0
+    property bool funLabOpen: false
     signal back()
     signal home()
     signal openDebugLog()
@@ -533,6 +534,24 @@ Rectangle {
                         wrapMode: Text.WordWrap
                     }
                 }
+
+                // 娱乐实验室入口: a card rather than a catalog action row, because
+                // the sheet itself is QML. Everything it drives is Android-only.
+                SettingCard {
+                    Layout.fillWidth: true
+                    visible: page.currentCategory === "hifi"
+                             && settings.value("funLabEnabled") === true
+
+                    SettingTitle { text: i18n.t("settings.funLab.title") }
+                    SettingDesc { text: i18n.t("settings.funLab.desc") }
+                    Button {
+                        Layout.fillWidth: true
+                        type: "filledTonal"
+                        icon: "auto_awesome"
+                        text: i18n.t("settings.funLab.open")
+                        onClicked: page.funLabOpen = true
+                    }
+                }
             }
 
             ViewportScrollBar {
@@ -549,5 +568,14 @@ Rectangle {
     }
 
     ColorPickerDialog { objectName: "settingsColorPicker" }
+
+    FunLab {
+        objectName: "settingsFunLab"
+        anchors.fill: parent
+        z: 30000
+        bottomInset: 170
+        opened: page.funLabOpen
+        onCloseRequested: page.funLabOpen = false
+    }
 
 }

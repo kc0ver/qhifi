@@ -197,6 +197,19 @@ public final class SettingsCatalog {
      *  reproducible and regression-testable. */
     public static final String HIFI_TUBE_DRIFT_KEY = "hifiTubeDrift";
 
+    // ---- 娱乐实验室 ------------------------------------------------------
+    // Deliberately non-essential toys behind one master switch, so the whole
+    // block can be removed later without touching playback or the audio chain.
+    public static final String FUN_LAB_KEY = "funLabEnabled";
+    /** Lyric-page tube glow while playing. */
+    public static final String FUN_TUBE_GLOW_KEY = "funTubeWarmup";
+    /** Lyric-page needle VU meter. */
+    public static final String FUN_VU_METER_KEY = "funVuMeter";
+    /** Lyric-page wooden radio frame. */
+    public static final String FUN_RADIO_SKIN_KEY = "funRadioSkin";
+    /** Play-history JSON accumulated by FunStatsCollector.qml. */
+    public static final String FUN_STATS_KEY = "funStats";
+
     private SettingsCatalog() {}
 
     public static List<SettingSpec> specs() {
@@ -686,6 +699,23 @@ public final class SettingsCatalog {
                 .dependsOn(HIFI_TUBE_TONE_KEY)
                 .group("hifiTube")
                 .build());
+
+        // ---- 娱乐实验室 (非必要功能，可整块移除) ------------------------------
+        out.add(SettingSpec.toggle(FUN_LAB_KEY, HIFI, "settings.funLab.title", true)
+                .desc("settings.funLab.desc")
+                .onlyOn(ANDROID)
+                .group("funLab")
+                .build());
+        // The toys' own switches have no catalog rows: they are toggled from the
+        // lab sheet itself, so the settings page stays one card.
+        out.add(SettingSpec.hidden(FUN_TUBE_GLOW_KEY, SettingSpec.SWITCH, false)
+                .onlyOn(ANDROID).build());
+        out.add(SettingSpec.hidden(FUN_VU_METER_KEY, SettingSpec.SWITCH, false)
+                .onlyOn(ANDROID).build());
+        out.add(SettingSpec.hidden(FUN_RADIO_SKIN_KEY, SettingSpec.SWITCH, false)
+                .onlyOn(ANDROID).build());
+        out.add(SettingSpec.hidden(FUN_STATS_KEY, SettingSpec.TEXT, "")
+                .onlyOn(ANDROID).build());
 
         // ---- 关于 -----------------------------------------------------------
         // GitHub mirror used to sit under 播放 even though it only accelerates

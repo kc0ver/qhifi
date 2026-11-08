@@ -315,4 +315,8 @@ SmoothRectangle {
             onClicked: mini.lyricsRequested()
         }
     }
+
+    // Fun lab's background listening-history collector. The mini player is always
+    // instantiated, so this keeps counting while other pages are open.
+    FunStatsCollector { objectName: "funStatsCollector" }
 }
