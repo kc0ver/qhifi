@@ -8,7 +8,7 @@ Rectangle {
     property real bottomContentInset: 0
     signal back()
     signal home()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     Component.onCompleted: player.loadPlaybackHistory()
 

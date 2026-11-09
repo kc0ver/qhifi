@@ -68,8 +68,25 @@ Item {
         anchors.fill: parent
         radius: control.cornerRadius
         color: containerColor
-        borderWidth: type === "outlined" ? 1 : 0
+        borderWidth: type === "outlined" || (Theme.retroWood && type === "filled") ? 1 : 0
         borderColor: enabled ? _colors.outline : _colors.disabledSecondaryVariant
+
+        // Retro skin: brass rim plus a lit top half, so filled buttons read as
+        // inlaid metal rather than a flat colour swatch.
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 1
+            height: Math.round(parent.height * 0.42)
+            radius: Math.max(0, control.cornerRadius - 1)
+            visible: Theme.retroWood && control.type !== "text" && control.type !== "outlined"
+            gradient: Gradient {
+                orientation: Gradient.Vertical
+                GradientStop { position: 0.0; color: "#33FFF0D2" }
+                GradientStop { position: 1.0; color: "#00FFF0D2" }
+            }
+        }
 
         SmoothRectangle {
             objectName: "miuixButtonStateLayer"

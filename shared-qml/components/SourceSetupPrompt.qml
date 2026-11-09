@@ -8,7 +8,7 @@ import "."
 // and controls from a previously removed source cannot still be operated.
 Rectangle {
     objectName: "sourceSetupPrompt"
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     MouseArea { anchors.fill: parent }
 

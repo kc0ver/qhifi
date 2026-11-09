@@ -13,7 +13,7 @@ import "."
 // hit-test math that reserves the same strip.
 Rectangle {
     id: bar
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
     opacity: hostWindow.focused ? 1 : 0.6
     Behavior on opacity { NumberAnimation { duration: 150 } }
 

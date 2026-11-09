@@ -13,7 +13,7 @@ Rectangle {
     property real bottomContentInset: 0
     signal back()
     signal home()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     property bool loadingWatch: player.artistLoading
     onLoadingWatchChanged: if (player.artistLoading) { scroller.contentY = 0; page.bioExpanded = false }

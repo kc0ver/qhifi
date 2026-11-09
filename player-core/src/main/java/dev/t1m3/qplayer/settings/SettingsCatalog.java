@@ -58,6 +58,9 @@ public final class SettingsCatalog {
      *  migration in SettingsCore.load. */
     public static final String BG_MODE_KEY = "lyricBgMode";
 
+    /** Walnut/brass retro skin. Read by Theme.qml through Main.qml. */
+    public static final String RETRO_WOOD_KEY = "retroWoodTheme";
+
     /** Fluid backdrop renderer, kept separate from dynamic/static so every style
      *  can still use the existing battery-saving static cache. */
     public static final String BG_STYLE_KEY = "lyricBgStyle";
@@ -237,6 +240,10 @@ public final class SettingsCatalog {
         out.add(SettingSpec.toggle("monet", APPEARANCE, "settings.monet.title", true)
                 .desc("settings.monet.desc")
                 .accessory("swatch")
+                .group("interface")
+                .build());
+        out.add(SettingSpec.toggle(RETRO_WOOD_KEY, APPEARANCE, "settings.retroWood.title", false)
+                .desc("settings.retroWood.desc")
                 .group("interface")
                 .build());
         out.add(SettingSpec.toggle("liquidGlassNavigation", APPEARANCE,

@@ -39,8 +39,23 @@ Item {
         anchors.fill: parent
         radius: cardRoot.radius
         color: cardRoot.containerColor
-        border.width: cardRoot.type === "outlined" ? 1 : 0
+        border.width: cardRoot.type === "outlined" || Theme.retroWood ? 1 : 0
         border.color: cardRoot.outlineColor
+    }
+
+    // Retro skin: a lit top edge and a dark bottom edge turn the flat fill into
+    // a raised panel. Both are inert decoration above the background.
+    Rectangle {
+        anchors.fill: parent
+        radius: cardRoot.radius
+        visible: Theme.retroWood
+        gradient: Gradient {
+            orientation: Gradient.Vertical
+            GradientStop { position: 0.0; color: "#1FFFE4BC" }
+            GradientStop { position: 0.12; color: "#00FFE4BC" }
+            GradientStop { position: 0.88; color: "#00000000" }
+            GradientStop { position: 1.0; color: "#33000000" }
+        }
     }
 
     Item {

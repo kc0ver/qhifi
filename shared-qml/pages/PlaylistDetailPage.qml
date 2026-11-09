@@ -11,7 +11,7 @@ Rectangle {
     signal back()
     signal home()
     signal openQueue()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     // Reset the scroll to the top whenever a new playlist starts loading, so the
     // previous playlist's scroll position doesn't carry over.

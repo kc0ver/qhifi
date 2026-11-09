@@ -14,7 +14,7 @@ Rectangle {
     signal back()
     signal home()
     signal openQueue()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     property string playlistId: player.openLocalPlaylistId
     property var tracksList: player.localPlaylistTracks

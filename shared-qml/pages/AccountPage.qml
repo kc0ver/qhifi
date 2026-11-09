@@ -16,7 +16,7 @@ Rectangle {
     signal back()
     signal home()
     signal requestLogin()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     // The source whose gear was tapped. Sign-in and sign-out act on this one
     // alone, so the two sources never share a setting.

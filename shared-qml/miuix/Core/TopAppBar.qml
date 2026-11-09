@@ -23,7 +23,7 @@ Rectangle {
     implicitWidth: parent ? parent.width : 640
     implicitHeight: topInset + collapsedHeight + expansionHeight * (1 - collapsedFraction)
         + (!large && subtitle !== "" ? subtitleLabel.implicitHeight + 8 : 0)
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
     clip: true
 
     IconButton {

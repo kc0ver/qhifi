@@ -21,7 +21,7 @@ Rectangle {
     signal back()
     signal home()
     signal openDebugLog()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     property var categories: settings.categories()
     property var categoryTabModel: {

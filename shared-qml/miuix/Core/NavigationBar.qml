@@ -12,7 +12,8 @@ Item {
     property string mode: "iconAndText"
     property bool showDivider: true
     property real bottomInset: 0
-    property color backgroundColor: Theme.color.surface
+    property color backgroundColor: Theme.retroWood
+                                    ? Theme.color.surfaceContainerLow : Theme.color.surface
     property color contentColor: Theme.color.onSurfaceContainer
     property color selectedContentColor: Theme.color.onSurfaceContainer
     readonly property real barHeight: model.length > 0 ? 64 + (showDivider ? 1 : 0) + Math.max(0, bottomInset) : 0
@@ -45,6 +46,16 @@ Item {
         height: navigationRoot.barHeight
         visible: navigationRoot.model.length > 0
         color: navigationRoot.backgroundColor
+        // Brass fascia line along the top of the wood cabinet.
+        Rectangle {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 1
+            visible: Theme.retroWood
+            color: "#D8B26A"
+            opacity: 0.55
+        }
         MouseArea { anchors.fill: parent }
         Divider { width: parent.width; visible: navigationRoot.showDivider }
         Row {

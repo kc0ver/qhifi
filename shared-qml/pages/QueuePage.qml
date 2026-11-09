@@ -18,7 +18,7 @@ Rectangle {
     property real bottomContentInset: 0
     signal back()
     signal home()
-    color: Theme.color.surface
+    color: Theme.color.pageBackground
 
     // Swallow taps on empty areas so they don't reach the page beneath.
     MouseArea { anchors.fill: parent }

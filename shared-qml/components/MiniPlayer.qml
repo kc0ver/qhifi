@@ -26,8 +26,11 @@ SmoothRectangle {
     }
 
     implicitHeight: 80
-    radius: liquidGlass ? height / 2 : 20
+    radius: liquidGlass ? height / 2 : (Theme.retroWood ? 8 : 20)
     color: liquidGlass ? "transparent" : Theme.color.surfaceContainer
+    // Retro skin: a thin brass edge so the bar reads as a metal-trimmed fascia.
+    borderWidth: Theme.retroWood && !liquidGlass ? 1 : 0
+    borderColor: Theme.color.outline
 
     // Drawn before the ordinary controls: their hit regions and playback state
     // stay in QML while the host samples only this capsule's live backdrop.

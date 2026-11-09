@@ -227,6 +227,13 @@ Rectangle {
         value: settings.resolvedDark
     }
 
+    // Texture sits above this root's own fill and below every page, which is why
+    // the wood scheme leaves pageBackground transparent.
+    RetroWoodGrain {
+        objectName: "retroWoodGrain"
+        anchors.fill: parent
+    }
+
     // System back press (hardware + gesture): the host bumps player.backTick; pop the
     // topmost open overlay/page, and only ask the host to exit when nothing is open.
     property int backTick: player.backTick

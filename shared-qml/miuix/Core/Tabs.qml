@@ -30,7 +30,7 @@ Item {
         anchors.right: parent.right
         // Primary Tabs with icons are 72dp, otherwise 48dp (Secondary is always 48dp)
         height: (root.type === "primary" && root._hasIcon) ? 72 : 48
-        color: Theme.color.surface
+        color: Theme.color.pageBackground
         
         RowLayout {
             anchors.fill: parent

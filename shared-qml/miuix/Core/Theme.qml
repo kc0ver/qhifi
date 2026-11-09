@@ -5,12 +5,17 @@ import miuix.Core
 QtObject {
     id: themeRoot
     property bool dynamicColors: false
+    // Walnut/brass retro skin. Off by default; the appearance setting drives it
+    // directly. Context globals (settings) are registered for every document,
+    // singletons included, so no host-side plumbing is needed.
+    property bool retroWood: settings.value("retroWoodTheme") === true
     readonly property color seedColor: StyleManager.seedColor
     function setSeedColor(value) { StyleManager.seedColor = String(value) }
     function setDark(value) { StyleManager.isDarkTheme = value; dark = value }
     property QtObject monet: MonetScheme { dark: themeRoot.dark }
     property bool dark: StyleManager.isDarkTheme
-    property var color: dynamicColors ? monet : (dark ? schemes.dark : schemes.light)
+    property var color: retroWood ? schemes.wood
+                                   : (dynamicColors ? monet : (dark ? schemes.dark : schemes.light))
     property QtObject schemes: QtObject {
         property QtObject light: QtObject {
             property color primaryVariant: "#3482FF"
@@ -88,6 +93,9 @@ QtObject {
             property color disabledOnSecondaryVariant: "#B2B2B2"
             property color sliderBackground: "#0F000000"
             property color windowDimming: "#4D000000"
+            // Full-bleed page fill. The wood scheme makes it transparent so the
+            // grain layer in Main.qml stays visible under every page.
+            property color pageBackground: "#F7F7F7"
         }
         property QtObject dark: QtObject {
             property color primaryVariant: "#0073DD"
@@ -165,11 +173,95 @@ QtObject {
             property color disabledOnSecondaryVariant: "#707170"
             property color sliderBackground: "#26FFFFFF"
             property color windowDimming: "#99000000"
+            property color pageBackground: "#000000"
+        }
+        // Walnut cabinet, brass trim, parchment ink. Every token the light and
+        // dark schemes define is present here because components index this
+        // object directly (Theme.color.x) regardless of which one is active.
+        property QtObject wood: QtObject {
+            property color primaryVariant: "#8A5F22"
+            property color onPrimaryVariant: "#EBD2A4"
+            property color secondaryContainerVariant: "#54392A"
+            property color onSecondaryContainerVariant: "#C7A97F"
+            property color tertiaryContainerVariant: "#3E2A1B"
+            property color disabledOnSurface: "#795E42"
+            property color onSurfaceContainerVariant: "#8F6E49"
+            property color onSurfaceContainerHighest: "#F0DFC4"
+            property color onPrimaryContainer: onPrimaryContainerColor
+            property color onSecondary: onSecondaryColor
+            property color onSecondaryContainer: onSecondaryContainerColor
+            property color onTertiaryContainer: onTertiaryContainerColor
+            property color onSurface: onSurfaceColor
+            property color onError: onErrorColor
+            property color onErrorContainer: onErrorContainerColor
+            property color disabledSecondary: "#3A2618"
+            property color disabledOnSecondary: "#8C7053"
+            property color disabledPrimaryButton: "#5A3C22"
+            property color disabledOnPrimaryButton: "#8C7053"
+            property color disabledPrimarySlider: "#6B4A2C"
+            property color sliderKeyPoint: "#4DC8963E"
+            property color sliderKeyPointForeground: "#E8BE74"
+            property color primary: "#C8963E"
+            property color onPrimaryColor: "#1E1206"
+            property color primaryContainer: "#8E5F2A"
+            property color onPrimaryContainerColor: "#FBEFD6"
+            property color secondary: "#4A3222"
+            property color onSecondaryColor: "#F3E3C8"
+            property color secondaryContainer: "#40281A"
+            property color onSecondaryContainerColor: "#EAD7B8"
+            property color tertiary: "#B0703C"
+            property color onTertiaryColor: "#20130A"
+            property color tertiaryContainer: "#3E2A1B"
+            property color onTertiaryContainerColor: "#DCAE79"
+            property color error: "#C45B45"
+            property color onErrorColor: "#2A0E08"
+            property color errorContainer: "#3A1A12"
+            property color onErrorContainerColor: "#F6D4C8"
+            property color background: "#33200F"
+            property color onBackgroundColor: "#F0DFC4"
+            property color surface: "#33200F"
+            property color onSurfaceColor: "#F0DFC4"
+            property color surfaceVariant: "#472D1A"
+            property color onSurfaceVariantColor: "#C7A97F"
+            property color outline: "#7A5330"
+            property color outlineVariant: "#573A22"
+            property color shadow: "#000000"
+            property color scrim: "#000000"
+            property color inverseSurface: "#F0DFC4"
+            property color inverseOnSurface: "#2A190F"
+            property color inversePrimary: "#8E5F2A"
+            property color surfaceDim: "#221409"
+            property color surfaceBright: "#4A2F1C"
+            property color surfaceContainerLowest: "#1E1209"
+            property color surfaceContainerLow: "#3D2814"
+            property color surfaceContainer: "#4E3520"
+            property color surfaceContainerHigh: "#5A3D25"
+            property color surfaceContainerHighest: "#66482C"
+            property color onSurfaceContainer: "#F0DFC4"
+            property color onSurfaceContainerHigh: "#8A6A47"
+            property color onPrimary: "#1E1206"
+            property color onBackground: "#F0DFC4"
+            property color onBackgroundVariant: "#B08A5E"
+            property color onSurfaceSecondary: "#E6F0DFC4"
+            property color onSurfaceVariantSummary: "#99F0DFC4"
+            property color onSurfaceVariantActions: "#66F0DFC4"
+            property color dividerLine: "#4E3420"
+            property color disabledPrimary: "#5A3C22"
+            property color disabledOnPrimary: "#8C7053"
+            property color secondaryVariant: "#54392A"
+            property color onSecondaryVariant: "#F0DCBC"
+            property color disabledSecondaryVariant: "#3A2618"
+            property color disabledOnSecondaryVariant: "#8C7053"
+            property color sliderBackground: "#33000000"
+            property color windowDimming: "#B3000000"
+            property color pageBackground: "#00000000"
         }
     }
     property QtObject metrics: QtObject {
-        property real cardRadius: 16
-        property real buttonRadius: 16
+        // The wood skin sits on squarer, cabinet-like corners; everything else
+        // keeps the rounded miuix geometry.
+        property real cardRadius: themeRoot.retroWood ? 10 : 16
+        property real buttonRadius: themeRoot.retroWood ? 10 : 16
         property real rowMinHeight: 56
         property real rowPadding: 16
         property real titleSize: 17
