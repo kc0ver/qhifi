@@ -93,6 +93,12 @@ public final class DesktopWindow {
      * getAndSet makes consuming atomic while still coalescing intermediate sizes.
      */
     private final AtomicReference<int[]> pendingResize = new AtomicReference<>();
+    // Windows only: a live WM_ENTERSIZEMOVE session. While the user is dragging
+    // a window edge, rebuilding the Skia surface/swapchain on every WM_SIZE can
+    // block for seconds on some drivers, so the render loop parks until the drop
+    // and applies the final size in one go.
+    private volatile boolean interactiveMoveResize;
+    private volatile boolean interactiveResized;
 
     // Persistent across render-thread respawns (built once, on the render thread).
     private volatile QmlView view;
@@ -130,6 +136,8 @@ public final class DesktopWindow {
     // WinFrameless is created per createWindow() call (see its own javadoc for why).
     private WindowChrome windowChrome;
     private WinFrameless frameless;
+    private WinResizeGesture resizeGesture;
+
     // 确保nudgeResizeOnce只调用一次，避免从托盘恢复时累积增加窗口尺寸
     private boolean nudgeApplied = false;
     private static volatile Boolean windows11OrLater;
@@ -479,7 +487,34 @@ public final class DesktopWindow {
         if (width <= 0 || height <= 0) return;
         fbW = width;
         fbH = height;
+        if (interactiveMoveResize) {
+            // DWM keeps stretching the last presented frame while the drag is in
+            // flight; applying every intermediate size is what made resizing
+            // stall, so only the drop's size is published.
+            interactiveResized = true;
+            return;
+        }
         pendingResize.set(new int[]{width, height});
+    }
+
+    /** WM_ENTERSIZEMOVE: the user grabbed an edge or the title bar. */
+    void onInteractiveMoveResizeStart() {
+        interactiveMoveResize = true;
+        interactiveResized = false;
+    }
+
+    /** WM_EXITSIZEMOVE: the drag ended, publish whatever size it settled on. */
+    void onInteractiveMoveResizeEnd() {
+        interactiveMoveResize = false;
+        if (interactiveResized) {
+            interactiveResized = false;
+            pendingResize.set(new int[]{fbW, fbH});
+        }
+    }
+
+    /** True only between the first WM_SIZE of a drag and its WM_EXITSIZEMOVE. */
+    boolean renderSuspendedForResize() {
+        return interactiveMoveResize && interactiveResized;
     }
 
     /**
@@ -827,6 +862,14 @@ public final class DesktopWindow {
 
         setWindowIcon();
         applyWindowsDwmChrome();
+        interactiveMoveResize = false;
+        interactiveResized = false;
+        // Under Windows' modal resize loop the host only records the final size;
+        // see WinResizeGesture. Installed before the custom title bar subclasses
+        // the same procedure, so the two chains stay ordered.
+        if (isWindows()) {
+            resizeGesture = WinResizeGesture.install(this);
+        }
         boolean customWindowsTitleBar = isWindows()
                 && (settings == null || !settings.bool("windowDecorated"));
         if (windowChrome == null) windowChrome = new WindowChrome(this, customWindowsTitleBar);

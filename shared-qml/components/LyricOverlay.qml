@@ -399,6 +399,22 @@ Item {
         onCloseRequested: overlay.chainPanelOpen = false
     }
 
+    // Radio skin: walnut plank behind the portrait title/artist block, so those
+    // two lines sit on the cabinet instead of on the blurred cover. Everything
+    // else on the page is left exactly as it was.
+    FunTitlePlate {
+        objectName: "lyricFunTitlePlate"
+        anchors.top: titleText.top
+        anchors.bottom: artistText.bottom
+        anchors.left: titleText.left
+        anchors.right: titleText.right
+        anchors.topMargin: -10
+        anchors.bottomMargin: -10
+        anchors.leftMargin: -10
+        anchors.rightMargin: -10
+        hostVisible: !overlay.landscape
+    }
+
     MarqueeText {
         id: titleText
         visible: !overlay.landscape

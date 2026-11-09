@@ -536,7 +536,7 @@ Rectangle {
                 }
 
                 // 娱乐实验室入口: a card rather than a catalog action row, because
-                // the sheet itself is QML. Everything it drives is Android-only.
+                // the sheet itself is QML.
                 SettingCard {
                     Layout.fillWidth: true
                     visible: page.currentCategory === "hifi"

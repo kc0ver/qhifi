@@ -98,7 +98,11 @@ final class RenderThread extends Thread {
 
             while (running) {
                 long frameStarted = System.nanoTime();
-                boolean renderFrame = win.windowVisible();
+                // A live Windows edge drag parks all main-window GPU work: DWM
+                // stretches the last frame, and the final size is applied once on
+                // WM_EXITSIZEMOVE. This avoids multi-second surface/swapchain
+                // rebuilds per intermediate WM_SIZE.
+                boolean renderFrame = win.windowVisible() && !win.renderSuspendedForResize();
                 // Layout and composition must use the same scale even when a DPI
                 // callback arrives without a framebuffer-size callback.
                 float uiScale = win.uiScale();

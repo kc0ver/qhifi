@@ -701,21 +701,18 @@ public final class SettingsCatalog {
                 .build());
 
         // ---- 娱乐实验室 (非必要功能，可整块移除) ------------------------------
+        // Available on both hosts: the desktop build is also used to preview the
+        // toys, and none of them touch an Android-only API.
         out.add(SettingSpec.toggle(FUN_LAB_KEY, HIFI, "settings.funLab.title", true)
                 .desc("settings.funLab.desc")
-                .onlyOn(ANDROID)
                 .group("funLab")
                 .build());
         // The toys' own switches have no catalog rows: they are toggled from the
         // lab sheet itself, so the settings page stays one card.
-        out.add(SettingSpec.hidden(FUN_TUBE_GLOW_KEY, SettingSpec.SWITCH, false)
-                .onlyOn(ANDROID).build());
-        out.add(SettingSpec.hidden(FUN_VU_METER_KEY, SettingSpec.SWITCH, false)
-                .onlyOn(ANDROID).build());
-        out.add(SettingSpec.hidden(FUN_RADIO_SKIN_KEY, SettingSpec.SWITCH, false)
-                .onlyOn(ANDROID).build());
-        out.add(SettingSpec.hidden(FUN_STATS_KEY, SettingSpec.TEXT, "")
-                .onlyOn(ANDROID).build());
+        out.add(SettingSpec.hidden(FUN_TUBE_GLOW_KEY, SettingSpec.SWITCH, false).build());
+        out.add(SettingSpec.hidden(FUN_VU_METER_KEY, SettingSpec.SWITCH, false).build());
+        out.add(SettingSpec.hidden(FUN_RADIO_SKIN_KEY, SettingSpec.SWITCH, false).build());
+        out.add(SettingSpec.hidden(FUN_STATS_KEY, SettingSpec.TEXT, "").build());
 
         // ---- 关于 -----------------------------------------------------------
         // GitHub mirror used to sit under 播放 even though it only accelerates

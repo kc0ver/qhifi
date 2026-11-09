@@ -21,6 +21,9 @@ Item {
     property real radius: 8
 
     readonly property bool vinyl: settings.value("lyricCoverStyle") === 1
+    // Vertical squash for the turntable view: a flat record seen from the front
+    // is an ellipse, so the deck and the spinning disc share this projection.
+    readonly property real tiltFactor: 0.62
 
     property bool playing: true
     // Item.visible is not ancestor-effective in qml4j.
@@ -46,25 +49,119 @@ Item {
         }
     }
 
-    // Soft circular drop under the disc. The lyric page's MultiEffect shadow is
+    // Turntable deck under the record: a dark platter plate squashed by the same
+    // projection as the disc, plus a walnut plinth face below it. Draw order is
+    // deck → record shadow → record.
+    Item {
+        id: deck
+        visible: cover.vinyl
+        anchors.fill: parent
+
+        Item {
+            id: platter
+            width: cover.width * 1.16
+            height: width
+            x: (cover.width - width) / 2
+            y: (cover.height - height) / 2
+            transform: Scale {
+                yScale: cover.tiltFactor
+                origin.x: platter.width / 2
+                origin.y: platter.height / 2
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                gradient: Gradient {
+                    orientation: Gradient.Vertical
+                    GradientStop { position: 0.0; color: "#33241A" }
+                    GradientStop { position: 0.52; color: "#1C130D" }
+                    GradientStop { position: 1.0; color: "#0E0906" }
+                }
+                border.width: 1
+                border.color: "#5C3E24"
+            }
+
+            Rectangle {
+                width: parent.width * 0.9
+                height: width
+                anchors.centerIn: parent
+                radius: width / 2
+                color: "transparent"
+                border.width: 1
+                border.color: "#332419"
+            }
+        }
+
+        // Plinth front face. The platter's lower rim overlaps it by a few px so
+        // the record reads as sitting in the deck, not floating above a bar.
+        Rectangle {
+            width: cover.width * 1.16
+            height: cover.width * 0.105
+            x: (cover.width - width) / 2
+            y: cover.height / 2 + cover.width * 1.16 * cover.tiltFactor / 2
+               - cover.width * 0.012
+            radius: 4
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#341D10" }
+                GradientStop { position: 0.2; color: "#6B3E1E" }
+                GradientStop { position: 0.5; color: "#7C4A24" }
+                GradientStop { position: 0.8; color: "#5A3418" }
+                GradientStop { position: 1.0; color: "#2E190D" }
+            }
+            border.width: 1
+            border.color: "#8A5A2E"
+
+            Rectangle {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.topMargin: 1
+                height: 1
+                color: "#D8B26A"
+                opacity: 0.6
+            }
+        }
+    }
+
+    // Soft elliptical drop on the deck. The lyric page's MultiEffect shadow is
     // a rectangular saveLayer and looks wrong around a round record, so vinyl
     // draws this instead and the page turns that effect off.
     Rectangle {
+        id: vinylShadow
         objectName: "playbackCoverVinylShadow"
         visible: cover.vinyl
         width: cover.width + 10
         height: width
         x: (cover.width - width) / 2
-        y: (cover.height - height) / 2 + 4
+        y: (cover.height - height) / 2 + 8
         radius: width / 2
         color: "#66000000"
+        transform: Scale {
+            yScale: cover.tiltFactor
+            origin.x: vinylShadow.width / 2
+            origin.y: vinylShadow.height / 2
+        }
     }
 
+    // The projector squashes the whole record vertically; the disc inside keeps
+    // only its own in-plane rotation, so it spins as a record instead of
+    // tumbling with the projection.
     Item {
-        id: disc
-        objectName: "playbackCoverDisc"
-        width: cover.width
-        height: cover.height
+        id: projector
+        anchors.fill: parent
+        transform: Scale {
+            yScale: cover.vinyl ? cover.tiltFactor : 1.0
+            origin.x: projector.width / 2
+            origin.y: projector.height / 2
+        }
+
+        Item {
+            id: disc
+            objectName: "playbackCoverDisc"
+            width: cover.width
+            height: cover.height
 
         Rectangle {
             objectName: "playbackCoverVinyl"
@@ -145,6 +242,7 @@ Item {
             border.width: 1
             border.color: "#3A3A3A"
         }
+    }
     }
 
     Timer {
