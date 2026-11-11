@@ -383,8 +383,14 @@ public final class QPlayerActivity extends Activity {
         // QML is authored in dp and qml4j does not scale Image.sourceSize by the
         // density, so covers need it to decode at display resolution rather than at
         // 1x and be upscaled -- see CoverImage.qml.
-        controller.setPixelRatio(density);
+        controller.setPixelRatio(density * settings.uiScaleFactor());
         glView = new QmlGLSurfaceView(this, bundle, resources, density);
+        glView.setUserScale(settings.uiScaleFactor());
+        registerSettingsHook(SettingsCatalog.UI_SCALE_KEY, ignored -> {
+            float factor = settings.uiScaleFactor();
+            controller.setPixelRatio(density * factor);
+            glView.setUserScale(factor);
+        });
         glView.setController(controller);
         glView.setSettings(settings);
         glView.setErrorListener(trace -> runOnUiThread(() -> showError(trace)));
@@ -744,10 +750,11 @@ public final class QPlayerActivity extends Activity {
         hideSplash();
         requestAudioPermission();
         requestNotificationPermission();
-        // Don't auto-check for updates on debug builds — only release builds nag.
+        // Don't auto-check for app updates on debug builds — only release builds nag.
         if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
             controller.checkForUpdate();
         }
+        controller.refreshPluginCatalog();
     }
 
     /** Playback state / track changed (main thread): poke the foreground service to

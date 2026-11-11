@@ -54,6 +54,16 @@ Flickable {
         for (var i = 0; i < parts.length; i++) if (parts[i] !== "") n++
         return n
     }
+    // True only when every selected row is one of the account's liked songs:
+    // the batch "unlike" action is offered for that selection alone. Same row id
+    // the per-row heart uses; likedRevision makes the liked set observable.
+    readonly property bool selectionAllLiked: {
+        if (view.selectedKey === "" || player.likedRevision < 0) return false
+        var parts = view.selectedKey.split("\n")
+        for (var i = 0; i < parts.length; i++)
+            if (parts[i] !== "" && !player.isMediaLiked(parts[i])) return false
+        return true
+    }
     // Every real song row gets the same right-click/long-press menu. Callers can
     // still turn it off for a deliberately read-only list; ownedPlaylist unlocks
     // "remove from playlist" inside a playlist the user owns.
@@ -75,6 +85,12 @@ Flickable {
     // every other caller renders unchanged.
     property bool showLikeButton: false
     property int rowH: 64
+    // Horizontal inset of each row's content (cover start / trailing-control end).
+    // Full-width lists whose header spans the page (detail heroes) pass
+    // Ui.gutter(width) so rows line up with the page title.
+    property real rowInset: 12
+    // Space at the top of the viewport covered by an overlaid page header.
+    property real scrollBarTopInset: 0
     property int activatedIndex: -1
     property int removeIndex: -1
     // Drag-to-reorder. The model is NOT touched while the finger is down: the
@@ -366,9 +382,16 @@ Flickable {
                 // Only present on SearchPage.qml's unified list (SearchRow.kindLabel);
                 // every other model shape leaves this "" so no tag renders.
                 tag: modelData.kindLabel || ""
-                highlighted: view.isLocal && view.highlightCurrent && (view.highlightByFilePath
+                // Now playing: the row's media identity against the controller's,
+                // or its file path for local files (which have no media id). Both
+                // stay right in filtered/sorted views whose row numbers no longer
+                // line up with the queue's.
+                highlighted: view.highlightCurrent && (view.highlightByFilePath
                     ? (player.currentFilePath !== "" && modelData.filePath === player.currentFilePath)
-                    : (player.currentMediaId !== "" && view.rowId(modelData) === player.currentMediaId))
+                    : ((player.currentMediaId !== "" && view.rowId(modelData) === player.currentMediaId)
+                       || (!!modelData.filePath && modelData.filePath === player.currentFilePath)))
+                contentInset: view.rowInset
+                durationMs: modelData.durationMs || 0
                 offlineReady: view.showOfflineBadge && !!modelData.cachedOffline
                 removable: view.removable && !view.selectMode
                 song: view.songMenu && (!view.menuEligibilityFromModel || !!modelData.menuEnabled)
@@ -377,6 +400,7 @@ Flickable {
                              && (!view.menuEligibilityFromModel || !!modelData.menuEnabled)
                 inOwnedPlaylist: view.ownedPlaylist
                 inCacheList: view.cacheList
+                sharedMenu: songMenuShared
                 selectMode: view.selectMode
                 selected: view.selectMode && view.selectedKey !== ""
                           && (("\n" + view.selectedKey + "\n").indexOf(
@@ -445,6 +469,15 @@ Flickable {
             }
         }
 
+        // The one context menu every row of this list opens (SongRow.sharedMenu).
+        // Created with the list, so opening a playlist no longer builds a Menu
+        // per visible row.
+        SongContextMenu {
+            id: songMenuShared
+            onClosed: if (menuRow) menuRow._menuArmed = false
+            onDownloadChosen: view.downloadClicked()
+        }
+
         // The carried row, lifted out of the list. A separate item rather than the
         // delegate itself: auto-scrolling can carry a row far past the live window,
         // and a recycled delegate would take the row being dragged with it.
@@ -466,6 +499,8 @@ Flickable {
             removable: view.removable
             showDownloadButton: !!player.downloadHelperEnabled && view.songMenu
             highlighted: false
+            contentInset: view.rowInset
+            durationMs: view._dragRow ? (view._dragRow.durationMs || 0) : 0
             rowTitle: view._dragRow ? (view.isLocal ? view._dragRow.title : view._dragRow.name) : ""
             rowArtist: view._dragRow ? view._dragRow.artist : ""
             coverThumbPath: view._dragRow ? (view._dragRow.coverThumbPath || "") : ""
@@ -477,6 +512,8 @@ Flickable {
 
     ViewportScrollBar {
         target: view
-        bottomInset: view.bottomContentInset
+        // Pages that overlay a RouteHeader keep the track below it.
+        y: view.contentY + view.scrollBarTopInset
+        bottomInset: view.bottomContentInset + view.scrollBarTopInset
     }
 }

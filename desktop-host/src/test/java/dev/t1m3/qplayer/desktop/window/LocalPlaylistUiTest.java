@@ -126,6 +126,10 @@ public class LocalPlaylistUiTest {
             assertNotNull("batch select lives on the page even with an empty list",
                     view.findByObjectName("localPlaylistSelectButton"));
             assertNotNull(view.findByObjectName("localPlaylistSelectBar"));
+            Item title = view.findByObjectName("routeHeaderTitle");
+            assertNotNull(title);
+            assertFalse("the header title stays hidden while the hero title is on screen",
+                    title.visible.peek());
             assertEquals("mixed", harness.player.localPlaylistTitle.peek());
         }
     }
@@ -193,6 +197,8 @@ public class LocalPlaylistUiTest {
             assertNotNull(view.findByObjectName("localPlaylistPage"));
             assertNotNull("the sync button appears once something is followed",
                     view.findByObjectName("localPlaylistSyncButton"));
+            assertNotNull("expanded sources draw one card per followed playlist",
+                    view.findByObjectName("localPlaylistSourceCard"));
         }
     }
 
@@ -286,9 +292,9 @@ public class LocalPlaylistUiTest {
                     + "    Component.onCompleted: page.showLocal = true }\n"
                     + "}");
             assertNotNull(view.findByObjectName("virtualPlaylistListRow"));
-            // Header: 45 preferred height + 8 bottom margin, then row 0's own centre.
-            assertTrue("a right click is accepted", view.dispatchPointerDown(450f, 85f, 2));
-            view.dispatchPointerUp(450f, 85f, 2);
+            // Toolbar: 4 top + 36 pill tabs + 8 gap, so row 0 spans y 48..112.
+            assertTrue("a right click is accepted", view.dispatchPointerDown(450f, 80f, 2));
+            view.dispatchPointerUp(450f, 80f, 2);
             settle(view);
 
             Item grip = view.findByObjectName("playlistListRowDragHandle");
@@ -325,8 +331,8 @@ public class LocalPlaylistUiTest {
                     + "}");
             assertNotNull(view.findByObjectName("virtualPlaylistListRow"));
 
-            assertTrue("a right click is accepted", view.dispatchPointerDown(450f, 85f, 2));
-            view.dispatchPointerUp(450f, 85f, 2);
+            assertTrue("a right click is accepted", view.dispatchPointerDown(450f, 80f, 2));
+            view.dispatchPointerUp(450f, 80f, 2);
             settle(view);
 
             Item grip = view.findByObjectName("playlistListRowDragHandle");

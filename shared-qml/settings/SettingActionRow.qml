@@ -1,66 +1,36 @@
 import QtQuick
 import miuix.Core
-import "../components"
+import design
+import "."
 
-BasicComponent {
+// SettingSpec.ACTION: a tappable row that invokes a host action. A provider's
+// live text (font name, cache size, app version) shows either inline on the
+// right (inlineProvider) or as the first summary line.
+Item {
     id: row
     property var spec: null
+    property bool separator: false
+    objectName: spec ? "setting_" + spec.key : ""
     property string providerText: spec && spec.provider.length > 0 ? settings.info(spec.provider) : ""
-    title: spec ? i18n.t(spec.title) : ""
-    summary: {
-        if (!row.spec) return ""
-        var desc = i18n.t(row.spec.desc)
-        return !row.spec.inlineProvider && row.providerText.length > 0
-            ? row.providerText + (desc.length > 0 ? "\n" + desc : "") : desc
-    }
-    property string rightText: spec && spec.inlineProvider ? providerText : (spec ? i18n.t(spec.button) : "")
-    startAction: Component {
-        Icon {
-            objectName: "settingActionLeadingIcon"
-            name: row.spec ? row.spec.icon : ""
-            implicitWidth: name.length > 0 ? 24 : 0
-            implicitHeight: implicitWidth
-            width: implicitWidth
-            height: implicitHeight
-            color: Theme.color.onSurfaceVariantColor
-        }
-    }
-    endAction: Component {
-        Item {
-            id: endItem
-            property real chevronWidth: 10
-            property real gap: row.rightText.length > 0 ? 8 : 0
-            property real capWidth: Math.max(0, (row.width - row.horizontalPadding * 2) * 0.4)
-            property real naturalWidth: probe.implicitWidth + chevronWidth + gap
-            implicitWidth: Math.min(naturalWidth, capWidth)
-            implicitHeight: Math.max(probe.implicitHeight, 16)
-            height: implicitHeight
 
-            // Hidden probe gives the stable natural width; the marquee itself
-            // is explicitly sized below, so no width binding can collapse into
-            // a measure loop (the previous elide attempt did exactly that).
-            Text {
-                id: probe
-                visible: false
-                text: row.rightText
-                font.pixelSize: 14
-            }
-            MarqueeText {
-                width: Math.max(0, endItem.width - endItem.chevronWidth - endItem.gap)
-                text: row.rightText
-                textColor: Theme.color.onSurfaceVariantActions
-                fontSize: 14
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            Icon {
-                id: chevron
-                name: "chevron_right"
-                x: endItem.width - width
-                width: endItem.chevronWidth; height: 16
-                anchors.verticalCenter: parent.verticalCenter
-                color: Theme.color.onSurfaceVariantActions
-            }
+    implicitHeight: frame.implicitHeight
+
+    SettingRowFrame {
+        id: frame
+        width: row.width
+        height: row.height
+        icon: row.spec ? row.spec.icon : ""
+        title: row.spec ? i18n.t(row.spec.title) : ""
+        summary: {
+            if (!row.spec) return ""
+            var desc = i18n.t(row.spec.desc)
+            return !row.spec.inlineProvider && row.providerText.length > 0
+                ? row.providerText + (desc.length > 0 ? "\n" + desc : "") : desc
         }
+        separator: row.separator
+        value: row.spec && row.spec.inlineProvider ? row.providerText
+               : (row.spec ? i18n.t(row.spec.button) : "")
+        indicator: "chevron_right"
+        onClicked: if (row.spec) settings.invoke(row.spec.action)
     }
-    onClicked: if (spec) settings.invoke(spec.action)
 }
