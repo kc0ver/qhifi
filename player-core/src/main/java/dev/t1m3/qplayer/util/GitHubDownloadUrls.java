@@ -11,8 +11,7 @@ import java.util.Set;
 /** One source of truth for application and plugin GitHub download mirrors. */
 public final class GitHubDownloadUrls {
     private static final String[] MIRRORS = {
-            "https://github.cnxiaobai.com/", "https://gh.ddlc.top/",
-            "https://ghfast.top/", "https://gh-proxy.com/"
+            "https://gh-proxy.com/", "https://github.cnxiaobai.com/"
     };
     /** Mirror used for api.github.com requests. */
     private static final String API_MIRROR = "https://gh-proxy.com/";
