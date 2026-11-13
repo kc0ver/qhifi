@@ -119,15 +119,26 @@ public final class AudioOutputStatus {
     public static AudioOutputStatus withRouting(AudioOutputStatus base, HifiOutputMode requested,
                                                 HifiOutputMode effective, String exclusiveState,
                                                 boolean bitPerfectActive, String fallbackReason) {
+        return withRouting(base, requested, effective, exclusiveState, bitPerfectActive,
+                fallbackReason, base != null ? base.volumeKind : "");
+    }
+
+    /** Variant for a dispatcher whose volume owner is not the backend that reported
+     *  the measurements — an exclusive route claimed ahead of playback owns the
+     *  slider while the framework path still supplies the rest of the readout. */
+    public static AudioOutputStatus withRouting(AudioOutputStatus base, HifiOutputMode requested,
+                                                HifiOutputMode effective, String exclusiveState,
+                                                boolean bitPerfectActive, String fallbackReason,
+                                                String volumeKind) {
         if (base == null) {
             return new AudioOutputStatus("", "", AudioOutputDevice.ROUTE_BUILTIN,
                     "", 0, 0, "", 0, 0, false, false, bitPerfectActive, "",
-                    requested, effective, exclusiveState, fallbackReason, "");
+                    requested, effective, exclusiveState, fallbackReason, volumeKind);
         }
         return new AudioOutputStatus(base.deviceId, base.deviceName, base.routeType,
                 base.sourceEncoding, base.sourceSampleRate, base.sourceBitDepth,
                 base.outputEncoding, base.outputSampleRate, base.outputBitDepth,
                 base.resampled, base.bitPerfectSupported, bitPerfectActive, base.reason,
-                requested, effective, exclusiveState, fallbackReason, base.volumeKind);
+                requested, effective, exclusiveState, fallbackReason, volumeKind);
     }
 }

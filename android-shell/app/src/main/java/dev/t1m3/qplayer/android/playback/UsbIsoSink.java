@@ -36,7 +36,7 @@ final class UsbIsoSink implements PcmSink {
      *  attenuates digitally. Software is also the fallback whenever the DAC
      *  answers no volume control, whatever the mode asks for. */
     private int volumeMode = 0;
-    private float lastVolume = 0.8f;
+    private float lastVolume = 0.3f;
     private long framesWritten;
     private volatile String lastError = "";
     private boolean opened;

@@ -24,6 +24,9 @@ import dev.t1m3.qplayer.util.Logger;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The one {@link AudioBackend} the app builds: it keeps the {@code MediaPlayer}
@@ -31,11 +34,13 @@ import java.util.Map;
  * controller, the playback service and the media session keep talking to a single
  * long-lived object while the strategy underneath changes.
  *
- * <p>Routing is decided per source, not at the moment the user flips the setting:
- * switching modes therefore never cuts the track that is playing. A mode that
- * cannot work here falls back to {@link HifiOutputMode#SYSTEM} and records why,
- * which the chain card shows — that is the only way this feature is allowed to
- * fail.
+ * <p>Routing is decided per source, so a route that merely appears never cuts
+ * the track that is playing. The exception is the user turning exclusive mode on
+ * (or launching the app with it already on): the DAC is claimed immediately, and
+ * a track playing on the framework path is handed over at its current position.
+ * A mode that cannot work here falls back to {@link HifiOutputMode#SYSTEM} and
+ * records why, which the chain card shows — that is the only way this feature is
+ * allowed to fail.
  *
  * <p>Delegation is total: every {@link AudioBackend} call goes to whichever
  * backend is currently active, and its callbacks are re-wired through here so a
@@ -78,6 +83,13 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     /** Receiver of the USB permission grant so the chain card refreshes the
      *  moment the user says yes. */
     private BroadcastReceiver usbPermissionReceiver;
+    /** Own thread for the best-effort DAC pre-claim: usbfs open/close can block. */
+    private final ExecutorService dacExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "hifi-dac-claim");
+        t.setDaemon(true);
+        return t;
+    });
+    private volatile boolean released;
 
     // --- callbacks, owned here and re-wired into every backend ---------------
     private Runnable onComplete;
@@ -111,6 +123,7 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
                 Logger.info("usb permission grant received: {}", granted);
                 if (granted) {
                     exclusiveUnavailable = false;
+                    acquireDac();
                 }
                 Runnable listener = deviceChangeListener;
                 if (listener != null) listener.run();
@@ -539,7 +552,11 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
 
     @Override
     public void setVolume(float volume) {
-        active.setVolume(volume);
+        // The exclusive route owns the slider from the moment it holds the DAC —
+        // including the pre-claim taken before the first track — so the level must
+        // land there even while the system path is still the routed backend.
+        AudioBackend owner = volumeOwner();
+        (owner != null ? owner : active).setVolume(volume);
     }
 
     @Override
@@ -584,6 +601,15 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
 
     @Override
     public void release() {
+        released = true;
+        dacExecutor.shutdownNow();
+        try {
+            // Let a claim that is inside usbfs open() finish before the sinks
+            // below are closed, or the two would race on the same fd.
+            dacExecutor.awaitTermination(500, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         stopWatchingRoutes();
         unregisterUsbPermissionReceiver();
         try {
@@ -641,8 +667,12 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
         boolean bitPerfectActive = effective == HifiOutputMode.EXCLUSIVE
                 && AudioOutputStatus.EXCLUSIVE_FULL.equals(exclusive)
                 && !base.resampled;
+        // A claim taken ahead of the first track is the volume owner even though
+        // the measurements above came from the framework path.
+        AndroidDirectAudioBackend owner = volumeOwner();
+        String volumeKind = owner != null ? owner.volumeKind() : base.volumeKind;
         AudioOutputStatus status = AudioOutputStatus.withRouting(base, requested,
-                effective, exclusive, bitPerfectActive, fallback);
+                effective, exclusive, bitPerfectActive, fallback, volumeKind);
         return status;
     }
 
@@ -658,23 +688,143 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
             effectiveMode = on ? HifiOutputMode.EXCLUSIVE : HifiOutputMode.SYSTEM;
             if (on) exclusiveUnavailable = false;
         }
+        if (on) acquireDac();
+        else releaseIdleClaim();
     }
 
     /**
-     * True while the USB driver really holds the DAC and is streaming. Only then
-     * does the volume belong to us: the stream the framework's own volume keys
-     * adjust is the one it mixes, and that is deliberately not this one — so a
-     * host that wants the keys to work must route them here instead.
+     * Take the DAC as soon as exclusive mode is on, instead of at the next track
+     * switch: enabling the setting claims the device right away, and launching the
+     * app with the setting already on does the same. If a track is playing on the
+     * framework path at that moment it is handed over to the exclusive stream at
+     * its current position; otherwise the claim alone is kept warm so the first
+     * track opens without the route-switch delay.
+     *
+     * <p>Runs on its own thread: the permission prompt and the usbfs claim are
+     * both I/O, and a caller may be the settings UI.
+     */
+    public void acquireDac() {
+        if (!hifiEnabled || released) return;
+        submitDac(() -> {
+            if (!hifiEnabled || released) return;
+            UsbDevice device = AndroidUsbAudio.findAudioDevice(appContext);
+            if (device == null) {
+                Logger.info("dac acquire: no usb audio device");
+                return;
+            }
+            if (!AndroidUsbAudio.hasPermission(appContext, device)) {
+                Logger.info("dac acquire: requesting usb permission for {}",
+                        device.getDeviceName());
+                AndroidUsbAudio.requestPermission(appContext, device);
+                return;
+            }
+            AndroidDirectAudioBackend claimed;
+            synchronized (lock) {
+                claimed = direct;
+            }
+            if (claimed != null && active == claimed) return;
+            boolean handover = active == system && system.isPlaying()
+                    && !lastSource.isEmpty();
+            long position = 0L;
+            if (handover) {
+                position = Math.max(0L, system.position());
+                try {
+                    system.pause();
+                } catch (Throwable ignored) {
+                }
+            }
+            AndroidDirectAudioBackend backend =
+                    direct(AndroidDirectAudioBackend.KIND_USB_EXCLUSIVE);
+            if (!backend.acquireExclusive()) {
+                if (handover) {
+                    try {
+                        system.resume();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                return;
+            }
+            // The claim changes which route owns the slider (and its level): let
+            // the host refresh its readout now, not on the next track.
+            notifyDeviceChanged();
+            if (!handover) return;
+            // Replaying from here also tells a failed handover where to continue.
+            lastStartMs = position;
+            directStarted = false;
+            switchTo(backend);
+            playOn(backend, lastSource, lastHeaders, position);
+            Logger.info("dac acquire: handed the current track over at {}ms", position);
+        });
+    }
+
+    /** Queue a DAC task, tolerating a release that happened after the caller's
+     *  check: the executor rejects work once shut down, and that is not an error. */
+    private void submitDac(Runnable task) {
+        try {
+            dacExecutor.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
+    }
+
+    /** Give an idle pre-claim back when exclusive mode is switched off. A stream
+     *  that is actually playing is left alone — cutting it mid-track would be
+     *  worse — and is closed when the route next changes. */
+    private void releaseIdleClaim() {
+        if (released) return;
+        submitDac(() -> {
+            if (hifiEnabled || released) return;
+            AndroidDirectAudioBackend backend;
+            synchronized (lock) {
+                backend = direct;
+                if (backend == null || active == backend) return;
+                direct = null;
+                directKind = -1;
+            }
+            try {
+                backend.release();
+            } catch (Throwable ignored) {
+            }
+            Logger.info("dac pre-claim released");
+            notifyDeviceChanged();
+        });
+    }
+
+    /** Tell the host the route readout needs a re-probe; never let a host
+     *  callback break the claim (a released controller rejects the refresh). */
+    private void notifyDeviceChanged() {
+        Runnable listener = deviceChangeListener;
+        if (listener == null) return;
+        try {
+            listener.run();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * True while the USB driver really holds the DAC — streaming, or claimed
+     * ahead of playback. Only then does the volume belong to us: the stream the
+     * framework's own volume keys adjust is the one it mixes, and that is
+     * deliberately not this one — so a host that wants the keys to work must
+     * route them here instead. A claim counts because the level set on it is the
+     * one the first track will start at, and it must be adjustable before then.
      */
     public boolean ownsOutputVolume() {
+        return volumeOwner() != null;
+    }
+
+    /** The exclusive backend that really holds the DAC right now, whether it is
+     *  the routed backend or a claim taken ahead of the first track. Null when
+     *  nothing exclusive is claimed, so the framework route keeps its own level. */
+    private AndroidDirectAudioBackend volumeOwner() {
         AndroidDirectAudioBackend backend;
         boolean enabled;
         synchronized (lock) {
             enabled = hifiEnabled;
             backend = direct;
         }
-        return enabled && backend != null && active == backend
-                && AudioOutputStatus.EXCLUSIVE_FULL.equals(backend.exclusiveState());
+        if (!enabled || backend == null) return null;
+        return AudioOutputStatus.EXCLUSIVE_FULL.equals(backend.exclusiveState())
+                ? backend : null;
     }
 
     /** The USB audio class in use, 1 or 2; 0 while no exclusive stream owns the
@@ -760,12 +910,12 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
     }
 
     /** What the volume slider drives right now ("hardware"/"software"/""),
-     *  re-read with the chain status so the volume readout labels itself. */
+     *  re-read with the chain status so the volume readout labels itself. A claim
+     *  taken before playback already drives it, so the readout is live from the
+     *  moment the DAC is held. */
     public String volumeKind() {
-        if (!hifiEnabled) return "";
-        AndroidDirectAudioBackend directBackend = direct;
-        return directBackend != null && active == directBackend
-                ? directBackend.volumeKind() : "";
+        AndroidDirectAudioBackend owner = volumeOwner();
+        return owner != null ? owner.volumeKind() : "";
     }
 
     /** Live: true only while the exclusive stream is up and the slider drives a
@@ -776,10 +926,8 @@ public final class HifiAudioDispatcher implements AudioBackend, HifiOutputContro
      *  volume. */
     @Override
     public boolean softwareVolumeActive() {
-        if (!hifiEnabled) return false;
-        AndroidDirectAudioBackend directBackend = direct;
-        if (directBackend == null || active != directBackend) return false;
-        return !directBackend.hardwareVolumeActive();
+        AndroidDirectAudioBackend owner = volumeOwner();
+        return owner != null && !owner.hardwareVolumeActive();
     }
 
     /** Same question as {@link #ownsOutputVolume()}: while the app's own stream is

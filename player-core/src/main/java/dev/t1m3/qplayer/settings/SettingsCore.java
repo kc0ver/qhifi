@@ -40,10 +40,15 @@ import java.util.function.Supplier;
  */
 public final class SettingsCore extends QObject implements LyricCompositor.SettingsBridge {
     private static final String APP_VOLUME_KEY = "volume";
-    /** The app's own USB exclusive stream keeps its level under its own key: it
+    /** The app's own USB exclusive stream keeps its level under its own keys: it
      *  is a separate route from the framework's, and one shared number would come
-     *  back on the other route at a different loudness after every switch. */
-    private static final String EXCLUSIVE_VOLUME_KEY = "hifiExclusiveVolume";
+     *  back on the other route at a different loudness after every switch. The
+     *  hardware and software modes keep separate levels too — the same position
+     *  means different loudness on a dB-mapped DAC control and on a digital gain,
+     *  so switching the mode restores the number last set there. The hardware key
+     *  is the pre-split name, so an upgrade keeps its level. */
+    private static final String EXCLUSIVE_HARDWARE_VOLUME_KEY = "hifiExclusiveVolume";
+    private static final String EXCLUSIVE_SOFTWARE_VOLUME_KEY = "hifiExclusiveVolumeSoftware";
 
     /** Resolved dark flag (mode + system state), read by Main.qml's StyleManager
      *  binding. Derived, never persisted. */
@@ -62,13 +67,14 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public final Property<Boolean> graphicsFallbackNotice = new Property<>(Boolean.FALSE);
     /** App-local playback gain in percent. Stored outside the generated catalog
      *  because its controls live in player chrome, not on the settings page. */
-    public final Property<Integer> appVolume = new Property<>(80);
-    /** The level the app's own USB exclusive stream keeps, in percent. Its own
-     *  route, its own control (the exclusive volume HUD), its own storage — so a
-     *  number set there never lands on the mixed framework path. Defaults to half
-     *  scale: an open used to inherit whatever level the DAC happened to sit at,
-     *  and a DAC parked at 0 dB arrives as full scale. */
-    public final Property<Integer> exclusiveVolume = new Property<>(50);
+    public final Property<Integer> appVolume = new Property<>(30);
+    /** The level the app's own USB exclusive stream keeps in hardware mode, in
+     *  percent. Defaults to 30: an open used to inherit whatever level the DAC
+     *  happened to sit at, and a DAC parked at 0 dB arrives as full scale. */
+    public final Property<Integer> exclusiveHardwareVolume = new Property<>(30);
+    /** The same for software mode. Its own number, because a digital gain at γ3
+     *  and a dB-mapped DAC control at the same position are not equally loud. */
+    public final Property<Integer> exclusiveSoftwareVolume = new Property<>(30);
 
     private final Map<String, SettingSpec> specsByKey = new LinkedHashMap<>();
     private final Map<String, Property<Object>> values = new HashMap<>();
@@ -81,6 +87,9 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private SettingsStore store;
     private String platform = SettingSpec.ANY;
     private PlayerController controller;
+    /** The selected exclusive volume mode, mirroring the catalog row: it decides
+     *  which of the two exclusive levels the settings-side writes go to. */
+    private int volumeMode = SettingsCatalog.VOLUME_MODE_HARDWARE;
     private volatile DirectoryPicker directoryPicker;
     /** Plain thread-safe mirror for non-QML consumers such as desktop lyrics. */
     private volatile boolean resolvedDarkSnapshot;
@@ -197,8 +206,14 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public void load(SettingsStore store, String platform) {
         this.store = store;
         this.platform = platform;
-        appVolume.set(Math.max(0, Math.min(100, store.getInt(APP_VOLUME_KEY, 80))));
-        exclusiveVolume.set(Math.max(0, Math.min(100, store.getInt(EXCLUSIVE_VOLUME_KEY, 50))));
+        appVolume.set(Math.max(0, Math.min(100, store.getInt(APP_VOLUME_KEY, 30))));
+        int hardwareVolume = Math.max(0, Math.min(100,
+                store.getInt(EXCLUSIVE_HARDWARE_VOLUME_KEY, 30)));
+        exclusiveHardwareVolume.set(hardwareVolume);
+        // A store from before the split has only the shared value: seed software
+        // mode with it so the upgrade does not change what the user last heard.
+        exclusiveSoftwareVolume.set(Math.max(0, Math.min(100,
+                store.getInt(EXCLUSIVE_SOFTWARE_VOLUME_KEY, hardwareVolume))));
         migrateLegacyKeys();
         this.specs = new ArrayList<>();
         for (SettingSpec s : SettingsCatalog.specs()) {
@@ -293,10 +308,12 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public void setAppVolume(int percent) {
         int clamped = Math.max(0, Math.min(100, percent));
         boolean exclusive = controller != null && !controller.hifiVolumeKind.peek().isEmpty();
-        Property<Integer> target = exclusive ? exclusiveVolume : appVolume;
+        Property<Integer> target = exclusive ? activeExclusiveVolume() : appVolume;
         if (clamped == target.peek()) return;
         target.set(clamped);
-        if (store != null) store.putInt(exclusive ? EXCLUSIVE_VOLUME_KEY : APP_VOLUME_KEY, clamped);
+        if (store != null) {
+            store.putInt(exclusive ? activeExclusiveVolumeKey() : APP_VOLUME_KEY, clamped);
+        }
         if (controller != null) controller.setVolume(clamped / 100f);
     }
 
@@ -310,10 +327,24 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
      *  hardware write. */
     public void noteVolumeFromHost(float level, boolean exclusive) {
         int percent = Math.round(Math.max(0f, Math.min(1f, level)) * 100f);
-        Property<Integer> target = exclusive ? exclusiveVolume : appVolume;
+        Property<Integer> target = exclusive ? activeExclusiveVolume() : appVolume;
         if (percent == target.peek()) return;
         target.set(percent);
-        if (store != null) store.putInt(exclusive ? EXCLUSIVE_VOLUME_KEY : APP_VOLUME_KEY, percent);
+        if (store != null) {
+            store.putInt(exclusive ? activeExclusiveVolumeKey() : APP_VOLUME_KEY, percent);
+        }
+    }
+
+    /** The exclusive level store for the mode currently selected: each mode keeps
+     *  its own number, so switching restores what was last set there. */
+    private Property<Integer> activeExclusiveVolume() {
+        return volumeMode == SettingsCatalog.VOLUME_MODE_SOFTWARE
+                ? exclusiveSoftwareVolume : exclusiveHardwareVolume;
+    }
+
+    private String activeExclusiveVolumeKey() {
+        return volumeMode == SettingsCatalog.VOLUME_MODE_SOFTWARE
+                ? EXCLUSIVE_SOFTWARE_VOLUME_KEY : EXCLUSIVE_HARDWARE_VOLUME_KEY;
     }
 
     /** Stepper -/+ , clamped. Keeps the arithmetic out of every generated row. */
@@ -558,7 +589,9 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         Fonts.setSelection(fontSelection());
         if (controller != null) {
             controller.setVolume(appVolume.peek() / 100f);
-            controller.restoreExclusiveVolume(exclusiveVolume.peek() / 100f);
+            controller.restoreExclusiveVolumes(
+                    exclusiveHardwareVolume.peek() / 100f,
+                    exclusiveSoftwareVolume.peek() / 100f);
         }
         for (SettingSpec s : specs) {
             if (!s.hasValue()) continue;
@@ -608,7 +641,19 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 controller.setHifiFollowSampleRate(bool(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
                 break;
             case SettingsCatalog.HIFI_VOLUME_MODE_KEY:
-                controller.setHifiVolumeMode(intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+                // Remember the mode first: setAppVolume/noteVolumeFromHost route
+                // their writes to that mode's own level store.
+                volumeMode = intOf(SettingsCatalog.HIFI_VOLUME_MODE_KEY)
+                        == SettingsCatalog.VOLUME_MODE_SOFTWARE
+                        ? SettingsCatalog.VOLUME_MODE_SOFTWARE
+                        : SettingsCatalog.VOLUME_MODE_HARDWARE;
+                controller.setHifiVolumeMode(volumeMode);
+                break;
+            case SettingsCatalog.HIFI_VOLUME_CURVE_KEY:
+                controller.setHifiVolumeCurve(intOf(SettingsCatalog.HIFI_VOLUME_CURVE_KEY));
+                break;
+            case SettingsCatalog.HIFI_VOLUME_GAMMA_KEY:
+                controller.setHifiVolumeGamma(intOf(SettingsCatalog.HIFI_VOLUME_GAMMA_KEY) / 100f);
                 break;
             case SettingsCatalog.HIFI_DEVICE_KEY:
                 controller.setHifiOutputDevice(str(SettingsCatalog.HIFI_DEVICE_KEY));

@@ -51,7 +51,7 @@ public final class AndroidAudioBackend implements AudioBackend, HifiOutputContro
     private String source;
     private long pendingSeekMs;
     private boolean wantPlay;
-    private float volume = 0.8f;
+    private float volume = 0.3f;
     private boolean prepared;
     private boolean seekingStart;
     private boolean playbackStarted;

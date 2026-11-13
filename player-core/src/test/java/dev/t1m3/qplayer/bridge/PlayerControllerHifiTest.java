@@ -7,6 +7,7 @@ import dev.t1m3.qplayer.audio.HifiCapabilities;
 import dev.t1m3.qplayer.audio.HifiOutputControl;
 import dev.t1m3.qplayer.audio.HifiOutputMode;
 import dev.t1m3.qplayer.netease.NeteaseClient;
+import dev.t1m3.qplayer.settings.SettingsCatalog;
 import dev.t1m3.qplayer.store.AppDirs;
 import org.junit.Rule;
 import org.junit.Test;
@@ -222,11 +223,11 @@ public class PlayerControllerHifiTest {
             controller.setVolume(0.9f);
             assertEquals(0.9f, backend.level, 1e-6);
 
-            // The exclusive route's own — and its default is half scale, not the
-            // full scale an open used to inherit from the DAC's own control.
+            // The exclusive route's own — and its default is 30%, not the full
+            // scale an open used to inherit from the DAC's own control.
             backend.exclusive = true;
             controller.setHifiEnabled(true);
-            assertEquals(0.5f, backend.level, 1e-6);
+            assertEquals(0.3f, backend.level, 1e-6);
             controller.setVolume(0.4f);
             assertEquals(0.4f, backend.level, 1e-6);
 
@@ -239,6 +240,47 @@ public class PlayerControllerHifiTest {
             // And returning to the exclusive route restores its own 0.4.
             backend.exclusive = true;
             controller.setHifiEnabled(true);
+            assertEquals(0.4f, backend.level, 1e-6);
+        } finally {
+            if (controller != null) controller.shutdownAsync().join();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /** The two exclusive modes keep their own level: the same position is a dB
+     *  mapping on the DAC's control and a digital gain on the samples, so switching
+     *  the mode must restore the number last set there, not carry the other one
+     *  over at a different loudness. */
+    @Test
+    public void hardwareAndSoftwareLevelsStayIndependent() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("hifi-mode-levels").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            VolumeProbeBackend backend = new VolumeProbeBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+
+            backend.exclusive = true;
+            controller.setHifiEnabled(true);
+
+            // Hardware mode (the default) keeps its own level.
+            controller.setHifiVolumeMode(SettingsCatalog.VOLUME_MODE_HARDWARE);
+            controller.setVolume(0.4f);
+            assertEquals(0.4f, backend.level, 1e-6);
+
+            // Software mode starts at its own default 30%, not the hardware 0.4.
+            controller.setHifiVolumeMode(SettingsCatalog.VOLUME_MODE_SOFTWARE);
+            assertEquals(0.3f, controller.volumeValue(), 1e-6);
+            controller.setVolume(0.7f);
+            assertEquals(0.7f, backend.level, 1e-6);
+
+            // Switching back restores the hardware level and applies it.
+            controller.setHifiVolumeMode(SettingsCatalog.VOLUME_MODE_HARDWARE);
+            assertEquals(0.4f, controller.volumeValue(), 1e-6);
             assertEquals(0.4f, backend.level, 1e-6);
         } finally {
             if (controller != null) controller.shutdownAsync().join();

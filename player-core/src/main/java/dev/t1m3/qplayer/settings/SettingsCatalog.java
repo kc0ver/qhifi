@@ -175,6 +175,14 @@ public final class SettingsCatalog {
     public static final String HIFI_VOLUME_MODE_KEY = "hifiVolumeMode";
     public static final int VOLUME_MODE_HARDWARE = 0;
     public static final int VOLUME_MODE_SOFTWARE = 1;
+    /** Response of the software (digital) volume on the exclusive stream:
+     *  0 = linear amplitude, 1 = power curve (position^gamma, the default).
+     *  Hardware mode is exempt — the DAC's own control is already linear in dB. */
+    public static final String HIFI_VOLUME_CURVE_KEY = "hifiVolumeCurve";
+    public static final int VOLUME_CURVE_LINEAR = 0;
+    public static final int VOLUME_CURVE_POWER = 1;
+    /** Power-curve exponent, stored ×100 (100..600); 300 = γ3. */
+    public static final String HIFI_VOLUME_GAMMA_KEY = "hifiVolumeGamma";
     /** Device id chosen from the picker dialog, "" = automatic. Stored without a
      *  row of its own: the list is dynamic, so the row is an action that opens
      *  the host's picker instead of a dropdown over static options. */
@@ -633,6 +641,22 @@ public final class SettingsCatalog {
                         VOLUME_MODE_HARDWARE,
                         "settings.hifiVolumeMode.hardware", "settings.hifiVolumeMode.software")
                 .desc("settings.hifiVolumeMode.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiOutput")
+                .build());
+        out.add(SettingSpec.radio(HIFI_VOLUME_CURVE_KEY, HIFI, "settings.hifiVolumeCurve.title",
+                        VOLUME_CURVE_POWER,
+                        "settings.hifiVolumeCurve.linear", "settings.hifiVolumeCurve.power")
+                .desc("settings.hifiVolumeCurve.desc")
+                .onlyOn(ANDROID)
+                .dependsOn(HIFI_ENABLED_KEY)
+                .group("hifiOutput")
+                .build());
+        out.add(SettingSpec.slider(HIFI_VOLUME_GAMMA_KEY, HIFI, "settings.hifiVolumeGamma.title",
+                        300, 100, 600, 10)
+                .desc("settings.hifiVolumeGamma.desc")
+                .scale(100)
                 .onlyOn(ANDROID)
                 .dependsOn(HIFI_ENABLED_KEY)
                 .group("hifiOutput")

@@ -424,10 +424,10 @@ public class PlayerControllerPlaybackTest {
             Thread.sleep(1050L);
             assertEquals(pausesAfterReplacement, backend.pauseCalls);
             assertTrue(backend.playing);
-            assertEquals(0.8f, backend.volume, 0.001f);
+            assertEquals(0.3f, backend.volume, 0.001f);
 
             backend.fireStarted();
-            assertEquals(0.8f, backend.volume, 0.001f);
+            assertEquals(0.3f, backend.volume, 0.001f);
         } finally {
             if (controller != null) lifecycle.close(controller);
             AppDirs.setBase(oldBase);
@@ -452,19 +452,19 @@ public class PlayerControllerPlaybackTest {
             controller.setFadeEnabled(true);
             controller.playQueueIndex(0);
             backend.fireStarted();
-            waitForVolume(backend, 0.8f, ASYNC_FADE_TIMEOUT_MS);
+            waitForVolume(backend, 0.3f, ASYNC_FADE_TIMEOUT_MS);
 
             backend.position = 119500L;
             controller.pump();
             // The fade worker can start late on a busy CI runner. Wait for an
             // observable fade sample instead of assuming one landed within 120 ms.
-            waitForVolumeBelow(backend, 0.8f, ASYNC_FADE_TIMEOUT_MS);
-            assertTrue(backend.volume < 0.8f);
+            waitForVolumeBelow(backend, 0.3f, ASYNC_FADE_TIMEOUT_MS);
+            assertTrue(backend.volume < 0.3f);
 
             controller.seek(1000L);
-            assertEquals(0.8f, backend.volume, 0.001f);
+            assertEquals(0.3f, backend.volume, 0.001f);
             Thread.sleep(550L); // the cancelled old end fade would have reached zero
-            assertEquals(0.8f, backend.volume, 0.001f);
+            assertEquals(0.3f, backend.volume, 0.001f);
         } finally {
             if (controller != null) lifecycle.close(controller);
             AppDirs.setBase(oldBase);

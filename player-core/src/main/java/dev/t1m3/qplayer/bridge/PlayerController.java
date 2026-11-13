@@ -68,6 +68,7 @@ import dev.t1m3.qplayer.plugin.ProviderCapability;
 import dev.t1m3.qplayer.plugin.SourceAccountRow;
 import dev.t1m3.qplayer.plugin.VerifiedPluginPackage;
 import dev.t1m3.qplayer.qml.QmlRuntimeLock;
+import dev.t1m3.qplayer.settings.SettingsCatalog;
 import dev.t1m3.qplayer.store.AppDirs;
 import dev.t1m3.qplayer.store.StorageFiles;
 import dev.t1m3.qplayer.util.GitHubDownloadUrls;
@@ -435,8 +436,19 @@ public final class PlayerController {
     // framework path owns its own. Sharing one level made the number set on either
     // side reappear on the other at a different loudness — the exclusive level is
     // read off a different scale (see volumeGain) than the framework's linear one.
-    private volatile float frameworkVolume = 0.8f;
-    private volatile float exclusiveVolume = 0.5f;
+    private volatile float frameworkVolume = 0.3f;
+    /** The two exclusive modes keep their own level: a hardware position is a dB
+     *  mapping on the DAC's control, a software one is a digital gain on the
+     *  samples, so the same number does not sound the same on both. Switching the
+     *  mode restores the level last set there instead of carrying the other one
+     *  over at a different loudness. */
+    private volatile float exclusiveHardwareVolume = 0.3f;
+    private volatile float exclusiveSoftwareVolume = 0.3f;
+    private volatile int hifiVolumeMode = SettingsCatalog.VOLUME_MODE_HARDWARE;
+    /** Response of the digital (exclusive software) volume: linear amplitude vs
+     *  position^gamma. Hardware mode is exempt, see volumeGain. */
+    private volatile int volumeCurve = SettingsCatalog.VOLUME_CURVE_POWER;
+    private volatile float volumeGamma = 3f;
     // Set once a fade-out has been STARTED for the CURRENT track, so pump()'s
     // near-the-end check doesn't keep re-triggering it every tick for the
     // remainder of playback.
@@ -501,7 +513,7 @@ public final class PlayerController {
      *  is only a position in the current queue and coincidentally lights up
      *  unrelated rows in any other list. */
     public final Property<String> currentMediaId = new Property<>("");
-    public final Property<Float> volume = new Property<>(0.8f);
+    public final Property<Float> volume = new Property<>(0.3f);
     /** Zero disables the session-only sleep timer. Rounded up for its UI label. */
     public final Property<Integer> sleepTimerRemainingMinutes = new Property<>(0);
     public final Property<Boolean> currentLiked = new Property<>(false);
@@ -3348,9 +3360,16 @@ public final class PlayerController {
     }
 
     /** The level that drives whatever route owns the output right now: the
-     *  exclusive stream's own, or the framework path's own. */
+     *  exclusive stream's own (per its volume mode), or the framework path's. */
     private float activeLevel() {
-        return exclusiveRouteOwns() ? exclusiveVolume : frameworkVolume;
+        return exclusiveRouteOwns() ? activeExclusiveLevel() : frameworkVolume;
+    }
+
+    /** The exclusive level of the mode currently selected — hardware and software
+     *  remember separate numbers. */
+    private float activeExclusiveLevel() {
+        return hifiVolumeMode == SettingsCatalog.VOLUME_MODE_SOFTWARE
+                ? exclusiveSoftwareVolume : exclusiveHardwareVolume;
     }
 
     /** True while the app's own USB stream — not the framework's mixed path —
@@ -3363,13 +3382,12 @@ public final class PlayerController {
     /** Exponent of the perceptual volume curve: gain = position ^ gamma. gamma=3
      *  measures as ~60*log10(position) dB — -60 dB at 10%, -18 dB at the halfway
      *  mark, 0 dB unchanged at the top — so the felt loudness steps are roughly
-     *  even instead of crowding the first few percent of the slider. */
-    private static final float VOLUME_CURVE_GAMMA = 3f;
-
-    /** Slider position 0..1 → linear gain, on the perceptual curve. */
-    private static float volumeGain(float position) {
+     *  even instead of crowding the first few percent of the slider. The user can
+     *  swap this for a plain linear response and tune the exponent. */
+    private float volumeGain(float position) {
         float x = Math.max(0f, Math.min(1f, position));
-        return (float) Math.pow(x, VOLUME_CURVE_GAMMA);
+        if (volumeCurve == SettingsCatalog.VOLUME_CURVE_LINEAR) return x;
+        return (float) Math.pow(x, volumeGamma);
     }
 
     /** True when the slider drives a digital attenuation right now. Only the
@@ -6706,7 +6724,11 @@ public final class PlayerController {
         synchronized (QmlRuntimeLock.MONITOR) {
             float clamped = Math.max(0f, Math.min(1f, v));
             if (exclusiveRouteOwns()) {
-                exclusiveVolume = clamped;
+                if (hifiVolumeMode == SettingsCatalog.VOLUME_MODE_SOFTWARE) {
+                    exclusiveSoftwareVolume = clamped;
+                } else {
+                    exclusiveHardwareVolume = clamped;
+                }
             } else {
                 frameworkVolume = clamped;
             }
@@ -6715,11 +6737,12 @@ public final class PlayerController {
         }
     }
 
-    /** Restore the exclusive route's own stored level (a settings push at start
+    /** Restore both exclusive routes' own stored levels (a settings push at start
      *  up). Deliberately does not drive anything: which route owns the output is
      *  a later decision, and the level is applied when one actually starts. */
-    public void restoreExclusiveVolume(float v) {
-        exclusiveVolume = Math.max(0f, Math.min(1f, v));
+    public void restoreExclusiveVolumes(float hardware, float software) {
+        exclusiveHardwareVolume = Math.max(0f, Math.min(1f, hardware));
+        exclusiveSoftwareVolume = Math.max(0f, Math.min(1f, software));
     }
 
     public void setPlayLevel(String level) {
@@ -6780,15 +6803,35 @@ public final class PlayerController {
     }
 
     /** Settings pick: which end the volume slider drives on an exclusive stream,
-     *  0 = hardware (software locked at 100%), 1 = software (hardware at max). */
+     *  0 = hardware (software locked at 100%), 1 = software (hardware at max). Each
+     *  mode keeps its own level, so switching restores the one last set there. */
     public void setHifiVolumeMode(int mode) {
+        hifiVolumeMode = mode == SettingsCatalog.VOLUME_MODE_SOFTWARE
+                ? SettingsCatalog.VOLUME_MODE_SOFTWARE : SettingsCatalog.VOLUME_MODE_HARDWARE;
         HifiOutputControl hifi = hifiControl();
-        if (hifi != null) hifi.setVolumeMode(mode == 1 ? 1 : 0);
+        if (hifi != null) hifi.setVolumeMode(hifiVolumeMode == SettingsCatalog.VOLUME_MODE_SOFTWARE ? 1 : 0);
         // The two modes put the slider on different ends of the chain (digital
-        // gain vs the DAC's own control), so re-send the level under whichever
-        // curve now applies — otherwise the first press after the switch jumps.
+        // gain vs the DAC's own control) and keep separate levels: re-send the one
+        // that now applies and move the slider onto it, or the first press after
+        // the switch would jump.
         applyEffectiveVolume(currentFadeGain());
+        volume.set(activeLevel());
         refreshHifiStatus();
+    }
+
+    /** Settings pick: response of the digital volume on the exclusive stream,
+     *  0 = linear amplitude, 1 = position^gamma. Re-sends the level so the
+     *  switch is heard immediately instead of on the next press. */
+    public void setHifiVolumeCurve(int curve) {
+        volumeCurve = curve == SettingsCatalog.VOLUME_CURVE_LINEAR
+                ? SettingsCatalog.VOLUME_CURVE_LINEAR : SettingsCatalog.VOLUME_CURVE_POWER;
+        applyEffectiveVolume(currentFadeGain());
+    }
+
+    /** Settings slider: exponent of the power curve (1.0..6.0), stored ×100. */
+    public void setHifiVolumeGamma(float gamma) {
+        volumeGamma = Math.max(1f, Math.min(6f, gamma));
+        applyEffectiveVolume(currentFadeGain());
     }
 
     /** Settings pick: force playback onto a device id, "" for automatic. */
@@ -6931,6 +6974,13 @@ public final class PlayerController {
         hifiExclusiveState.set(status.exclusiveState);
         hifiFallbackReason.set(status.fallbackReason);
         hifiVolumeKind.set(status.volumeKind);
+        // The exclusive route can hold the DAC (and thus the slider) before the
+        // first track ever plays. Move the slider onto that route's own level and
+        // put the level on the DAC now, so it can be preset without playback.
+        if (exclusiveRouteOwns()) {
+            applyEffectiveVolume(currentFadeGain());
+            volume.set(activeLevel());
+        }
         hifiUacVersion.set(uacVersion == 2 ? "UAC 2.0"
                 : uacVersion == 1 ? "UAC 1.0" : "");
     }

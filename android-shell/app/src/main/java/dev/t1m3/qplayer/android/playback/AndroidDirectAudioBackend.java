@@ -1,6 +1,7 @@
 package dev.t1m3.qplayer.android.playback;
 
 import android.content.Context;
+import android.hardware.usb.UsbDevice;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
@@ -128,7 +129,7 @@ final class AndroidDirectAudioBackend implements AudioBackend {
     /** Set when a track reached its own end: the ring still holds its tail, so the
      *  next source must NOT flush it — the tail is the gapless hand-off. */
     private boolean tailCarriesOver;
-    private int volumePercent = 80;
+    private int volumePercent = 30;
     private AudioFocusRequest focusRequest;
     private boolean hasFocus;
     private boolean resumeOnGain;
@@ -186,6 +187,52 @@ final class AndroidDirectAudioBackend implements AudioBackend {
         return sink instanceof UsbIsoSink && sink.exclusive()
                 && ((UsbIsoSink) sink).hasHardwareVolume()
                 && ((UsbIsoSink) sink).volumeModeIsHardware();
+    }
+
+    /** The formats a pre-claim tries, in order: a plain 48 kHz stereo container
+     *  almost every UAC DAC runs, then 44.1 kHz for the ones that do not. */
+    private static final int[] PRE_CLAIM_RATES = {48000, 44100};
+
+    /** Claim the DAC ahead of playback: open the sink at a common format but do
+     *  not start a stream, so enabling exclusive mode (or launching the app with
+     *  it on) takes the device now instead of leaving the first track to a route
+     *  switch. A later play() reuses the claim when the source happens to match
+     *  and rebuilds the sink otherwise. */
+    boolean acquireExclusive() {
+        if (!(sink instanceof UsbIsoSink)) return false;
+        UsbIsoSink usb = (UsbIsoSink) sink;
+        UsbDevice device = AndroidUsbAudio.findAudioDevice(appContext);
+        if (device == null) {
+            Logger.info("usb pre-claim: no dac");
+            return false;
+        }
+        if (!AndroidUsbAudio.hasPermission(appContext, device)) {
+            Logger.info("usb pre-claim: requesting permission for {}", device.getDeviceName());
+            AndroidUsbAudio.requestPermission(appContext, device);
+            return false;
+        }
+        if (usb.isOpen() && usb.matchesCurrentDevice()) return true;
+        if (usb.isOpen()) usb.close();
+        synchronized (lock) {
+            if (closed) return false;
+        }
+        for (int rate : PRE_CLAIM_RATES) {
+            if (!usb.open(rate, 2, false, -1)) continue;
+            int volume;
+            synchronized (lock) {
+                if (closed) {
+                    usb.close();
+                    return false;
+                }
+                volume = volumePercent;
+            }
+            usb.setVolume(volume / 100f);
+            Logger.info("usb pre-claim: claimed {} at {}Hz (uac{})",
+                    device.getDeviceName(), usb.sampleRate(), usb.uacVersion());
+            return true;
+        }
+        Logger.warn("usb pre-claim failed: {}", usb.lastError());
+        return false;
     }
 
     // --- AudioBackend ------------------------------------------------------

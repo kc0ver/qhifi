@@ -25,10 +25,12 @@ public class HifiSettingsTest {
     @Test
     public void everyHifiRowIsAndroidOnly() {
         Set<String> android = keysOn(SettingsCatalog.HIFI, SettingsCatalog.ANDROID);
-        assertEquals(10, android.size());
+        assertEquals(12, android.size());
         assertTrue(android.contains(SettingsCatalog.HIFI_ENABLED_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_FOLLOW_RATE_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_MODE_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_CURVE_KEY));
+        assertTrue(android.contains(SettingsCatalog.HIFI_VOLUME_GAMMA_KEY));
         assertTrue(android.contains(SettingsCatalog.HIFI_KEEPALIVE_KEY));
         assertTrue(android.contains("action:pickHifiDevice"));
         assertTrue(android.contains(SettingsCatalog.HIFI_TUBE_TONE_KEY));
