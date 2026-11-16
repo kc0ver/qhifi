@@ -18,11 +18,11 @@ android {
         applicationId = "com.kc0ver.qhifi"
         minSdk = 26
         targetSdk = 34
-        versionCode = 112
+        versionCode = 114
         // Tracks the upstream release it is built from, marked as the fork build
-        // ("2.0.0" → "2.0.0-hifi"). The update check ignores the suffix,
+        // ("2.1.1" → "2.1.1-hifi"). The update check ignores the suffix,
         // so a release of this fork is only "newer" once its numeric part is.
-        versionName = "2.0.0-hifi"
+        versionName = "2.1.1-hifi"
         manifestPlaceholders["appLabel"] = "QHIFI"
         // The exclusive USB driver is a native .so; the app is already arm64
         // in practice (the bundled Skija library is), so the native build

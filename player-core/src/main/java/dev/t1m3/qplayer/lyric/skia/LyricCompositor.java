@@ -58,8 +58,6 @@ public final class LyricCompositor {
          *  and progress along the bottom. Desktop-only setting, so this stays
          *  false on hosts that don't offer the row. */
         default boolean lyricFullWidth() { return false; }
-        /** Scattered lyric-cloud layout; the column spans the whole page. */
-        default boolean lyricLayoutCloud() { return false; }
     }
 
     // Reserved height (logical px) for the lyric-page transport bar at the bottom
@@ -589,11 +587,8 @@ public final class LyricCompositor {
         coverOnlyCached = coverOnly;
         // Full-width is a wide-window layout, and it has nothing to say about a
         // track with no lyrics — that view is the cover, which this mode removes.
-        boolean cloud = settings != null && settings.lyricLayoutCloud();
-        // Cloud uses the whole page, so it rides the same full-width chrome as
-        // the wide-window layout (cover gone, transport along the bottom).
-        boolean fullWidth = !coverOnly && ((landscape && settings != null
-                && settings.lyricFullWidth()) || cloud);
+        boolean fullWidth = !coverOnly && landscape && settings != null
+                && settings.lyricFullWidth();
         float fullWidthTarget = fullWidth ? 1f : 0f;
         long fullWidthNow = System.nanoTime();
         if (lyricSlide < 0.99f || fullWidthNs == 0L) {
@@ -671,7 +666,7 @@ public final class LyricCompositor {
         }
         boolean bgStatic = settings != null && settings.lyricBgStatic();
         int bgStyle = settings != null
-                ? settings.lyricBgStyle() : FluidBackground.STYLE_PIXI_RENDERER;
+                ? settings.lyricBgStyle() : FluidBackground.STYLE_MESH_GRADIENT;
         int bgSaturation = settings != null ? settings.lyricBgSaturation() : 100;
         if (backdropClipRect == null || backdropClipW != w || backdropClipH != h) {
             backdropClipRect = Rect.makeWH(w, h);
@@ -776,10 +771,7 @@ public final class LyricCompositor {
                 lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
             }
             canvas.restoreToCount(zc);
-            lyMaskPaint.setShader(lyFadeShader);
-            lyMaskPaint.setBlendMode(BlendMode.DST_IN);
-            canvas.drawRect(colRect, lyMaskPaint);
-            lyMaskPaint.setShader(null);
+            applyColumnMask(canvas, lyFadeShader);
             canvas.restoreToCount(lc);
         }
 
@@ -804,20 +796,23 @@ public final class LyricCompositor {
         // Build the band from THIS frame's lit lines (render just refreshed them), so
         // the sharp plateau covers the whole active group rather than one anchor line.
         ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
-        lyMaskPaint.setShader(blurBandShader);
-        lyMaskPaint.setBlendMode(BlendMode.DST_IN);
-        canvas.drawRect(colRect, lyMaskPaint);
-        lyMaskPaint.setShader(null);
+        applyColumnMask(canvas, blurBandShader);
         canvas.restoreToCount(mb);
 
         // Sharp copy, kept only across the focus band (complementary mask, no overlap).
         int ms = canvas.saveLayer(colRect, null);
         lyricRenderer.render(canvas, leftX, colTopY, colW, colH, pos);
-        lyMaskPaint.setShader(sharpBandShader);
-        lyMaskPaint.setBlendMode(BlendMode.DST_IN);
-        canvas.drawRect(colRect, lyMaskPaint);
-        lyMaskPaint.setShader(null);
+        applyColumnMask(canvas, sharpBandShader);
         canvas.restoreToCount(ms);
+    }
+
+    void applyColumnMask(Canvas canvas, Shader shader) {
+        lyMaskPaint.setShader(shader).setBlendMode(BlendMode.DST_IN);
+        // A rect's antialiased edge only partially applies DST_IN at fractional
+        // device coordinates, leaving a bright one-pixel fringe. Mask the whole
+        // current layer instead; its bounds already constrain the work.
+        canvas.drawPaint(lyMaskPaint);
+        lyMaskPaint.setShader(null);
     }
 
     private void ensureBlurFilter(float sigma) {

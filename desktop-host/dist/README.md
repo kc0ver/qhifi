@@ -107,6 +107,16 @@ For viewport and input changes, also exercise a real window:
   gap and any page-specific footer spacing; scrollbar tracks also end above
   this area. Ordinary MiniPlayer styling remains opaque, with page content
   filling its rounded-corner gaps.
+- With liquid glass enabled, repeatedly resize through 1100→839→841→420→1100
+  logical pixels. Check the navigation and MiniPlayer backdrop, toggle glass off
+  and on, then hide to tray and restore. OpenGL backdrop copies use a Skia-owned
+  GPU surface, not the window system's resizable default framebuffer. Run
+  `mvn -pl desktop-host -Dtest=GLBackendResizeTest test` with a working display
+  for the deferred-copy, resize and output-pixel checks. Linux verification
+  does not replace the macOS Apple GL-on-Metal check.
+- Navigate away from and back to a page containing loaded covers. During the
+  page fade, artwork must not reveal the placeholder glyph or grey fill beneath
+  it. Empty, loading and failed covers must still show their placeholder.
 - Drag "Settings → Appearance → Interface scale" from 100% to 150% and back to
   80%. The window must re-layout once on release, keep pointer hit targets
   aligned with the drawn controls, and update its minimum size. At 125% in a
@@ -268,6 +278,9 @@ version retain the suffix; macOS bundle and Windows binary version fields use th
 numeric version required by their platforms.
 For a desktop-only manual packaging preflight, set `desktop_only` to `true` and
 pass the intended RC in `version`; this does not rebuild Android or publish assets.
+For an Android frame-time build, set `android_only` and `android_perf` to `true`.
+The run uploads `QPlayer-android-perf` as a workflow artifact and never publishes it.
+The APK installs beside the release app as `QPlayer (perf)` and uses the debug key.
 
 CI produces an Apple Silicon DMG on `macos-15`. Intel Mac users build locally;
 the Maven OS profiles select native dependencies for the current architecture.
