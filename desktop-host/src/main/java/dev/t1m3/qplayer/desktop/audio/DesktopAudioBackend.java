@@ -15,6 +15,7 @@ import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.LongSupplier;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -71,6 +72,8 @@ public final class DesktopAudioBackend implements AudioBackend {
     private Runnable requestOnComplete;
     private Runnable requestOnStarted;
     private Runnable requestOnError;
+    /** Guarded by this; a prepared decoder and its queued PCM survive an ordinary pause. */
+    private boolean decoderReady;
     private volatile long positionMs = 0L;
     private volatile long durationMs = 0L;
     /** Published before decoder construction; controls cancel IO, never native decoders. */
@@ -90,6 +93,11 @@ public final class DesktopAudioBackend implements AudioBackend {
     private boolean outputNeedsReprime;
     private String lastDefaultDevice = "";
     private long lastDeviceCheckNanos;
+    private final LongSupplier outputGeneration;
+    private long openedGeneration;
+    private boolean routeRetryPending;
+    /** One reopen-failure warning per outage; cleared by the next successful reopen. */
+    private boolean reopenFailureLogged;
     private ByteBuffer nativeChunk;
     private final byte[] stagingChunk = new byte[CHUNK_BYTES];
     private final ArrayDeque<Integer> queuedFrames = new ArrayDeque<>();
@@ -100,6 +108,14 @@ public final class DesktopAudioBackend implements AudioBackend {
     private long framesSinceBase = 0L;
     private volatile String cachePendingPath;
     private volatile String cacheCompletePath;
+
+    public DesktopAudioBackend() {
+        this(MacOutputRoute::generation);
+    }
+
+    DesktopAudioBackend(LongSupplier outputGeneration) {
+        this.outputGeneration = outputGeneration;
+    }
 
     @Override
     public void play(String src, long startMs) {
@@ -124,6 +140,7 @@ public final class DesktopAudioBackend implements AudioBackend {
         requestOnComplete = onComplete;
         requestOnStarted = onStarted;
         requestOnError = onError;
+        decoderReady = false;
         sourceRevision.incrementAndGet();
         cancelReads();
         // Publish the new track's baseline synchronously. Until the audio thread
@@ -139,9 +156,13 @@ public final class DesktopAudioBackend implements AudioBackend {
     @Override
     public synchronized void pause() {
         playing.set(false);
-        sourceRevision.incrementAndGet();
-        seekTargetMs.set(positionMs);
-        cancelReads();
+        // Only an unfinished open needs cancellation. Reopening a prepared source on
+        // resume discards queued PCM, repeats decoder seeking and restarts onStarted.
+        if (!decoderReady) {
+            sourceRevision.incrementAndGet();
+            seekTargetMs.set(positionMs);
+            cancelReads();
+        }
     }
 
     @Override
@@ -216,7 +237,7 @@ public final class DesktopAudioBackend implements AudioBackend {
     }
 
     private synchronized void activateBytes(SeekableByteSource bytes, long revision) throws IOException {
-        if (shuttingDown.get() || revision != sourceRevision.get() || !playing.get()) {
+        if (shuttingDown.get() || revision != sourceRevision.get() || (!playing.get() && !decoderReady)) {
             bytes.close();
             throw new java.io.InterruptedIOException("audio request cancelled");
         }
@@ -346,7 +367,10 @@ public final class DesktopAudioBackend implements AudioBackend {
             // Opening/priming can take long enough for play() to replace the request.
             // Do not announce or start the stale decoder; in particular, its
             // onStarted must not cancel the new track's volume transition.
-            if (openRevision != sourceRevision.get()) return false;
+            synchronized (this) {
+                if (openRevision != sourceRevision.get()) return false;
+                decoderReady = true;
+            }
 
             while (!shuttingDown.get()) {
                 // A different track requested → bail so the loop reopens it.
@@ -417,6 +441,9 @@ public final class DesktopAudioBackend implements AudioBackend {
             }
             return false;
         } finally {
+            synchronized (this) {
+                if (openRevision == sourceRevision.get()) decoderReady = false;
+            }
             alSourceStop(sourceId);
             alSourcei(sourceId, AL_BUFFER, 0);
             queuedFrames.clear();
@@ -574,10 +601,11 @@ public final class DesktopAudioBackend implements AudioBackend {
     private int decodeInto(PcmSource pcm, int buf) throws Exception {
         int frameBytes = channels * 2;
         int want = CHUNK_BYTES - (CHUNK_BYTES % frameBytes);
-        if (!pcm.hasBuffered(Math.max(frameBytes, want / 4))) return -1;
+        int bufferedBytes = Math.max(frameBytes, want / 4);
         int got = 0;
         boolean eof = false;
         while (got < want) {
+            if (!pcm.hasBuffered(bufferedBytes)) break;
             int r = pcm.read(stagingChunk, got, want - got);
             if (r < 0) { eof = true; break; }
             if (r == 0) break;
@@ -603,6 +631,8 @@ public final class DesktopAudioBackend implements AudioBackend {
     }
 
     private void initOpenAl() {
+        // Subscribe before opening so a change during device initialization isn't lost.
+        openedGeneration = outputGeneration.getAsLong();
         device = alcOpenDevice((ByteBuffer) null);
         if (device == NULL) throw new IllegalStateException("OpenAL: no audio device");
         ALCCapabilities alcCaps = ALC.createCapabilities(device);
@@ -614,6 +644,8 @@ public final class DesktopAudioBackend implements AudioBackend {
         reopenDeviceSupported = alcCaps.ALC_SOFT_reopen_device;
         disconnectSupported = alcCaps.ALC_EXT_disconnect;
         lastDefaultDevice = defaultPlaybackDevice();
+        Logger.info("audio: opened default output {}, route generation {}, reopen supported {}",
+                lastDefaultDevice, openedGeneration, reopenDeviceSupported);
         sourceId = alGenSources();
         buffers = new int[NUM_BUFFERS];
         for (int i = 0; i < NUM_BUFFERS; i++) buffers[i] = alGenBuffers();
@@ -637,16 +669,29 @@ public final class DesktopAudioBackend implements AudioBackend {
         }
         if (!reopenDeviceSupported || device == NULL) return connected;
         long now = System.nanoTime();
-        if (now - lastDeviceCheckNanos < DEVICE_CHECK_NANOS) return connected;
+        if (now - lastDeviceCheckNanos < DEVICE_CHECK_NANOS) return connected && !routeRetryPending;
         lastDeviceCheckNanos = now;
         String current = defaultPlaybackDevice();
-        if (connected && (current.isEmpty() || current.equals(lastDefaultDevice))) return true;
+        long generation = outputGeneration.getAsLong();
+        boolean routeChanged = generation != openedGeneration;
+        if (connected && !routeChanged && (current.isEmpty() || current.equals(lastDefaultDevice))) return true;
         if (!SOFTReopenDevice.alcReopenDeviceSOFT(device, (ByteBuffer) null, (IntBuffer) null)) {
-            if (connected) Logger.warn("audio: failed to reopen OpenAL on {}", current);
-            return isOutputConnected();
+            if (!reopenFailureLogged) {
+                reopenFailureLogged = true;
+                Logger.warn("audio: could not reopen output {} (route {}, ALC error {}); retrying",
+                        current, generation, alcGetError(device));
+            }
+            routeRetryPending = routeChanged;
+            return !routeRetryPending && isOutputConnected();
         }
+        // Even a same-name reconnect can leave the old source stopped with its
+        // entire queue marked processed. Refill from the last known playhead.
+        if (routeChanged) outputNeedsReprime = true;
+        openedGeneration = generation;
+        routeRetryPending = false;
+        reopenFailureLogged = false;
         lastDefaultDevice = current;
-        Logger.info("audio: reopened OpenAL on {}", current);
+        Logger.info("audio: reopened default output {} (route {}, position {} ms)", current, generation, positionMs);
         return isOutputConnected();
     }
 

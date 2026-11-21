@@ -87,7 +87,17 @@ Item {
         if (query.text.length > 0) page.runSearchNow()
     }
 
-    Component.onCompleted: player.loadHotSearches()
+    // Fetched on the first visible frame, not at construction: the idle prewarm
+    // builds this page invisibly at startup, and that must not cost a plugin
+    // network request for users who never open 搜索.
+    property bool hotSearchesRequested: false
+    function requestHotSearchesOnce() {
+        if (!page.visible || page.hotSearchesRequested) return
+        page.hotSearchesRequested = true
+        player.loadHotSearches()
+    }
+    onVisibleChanged: page.requestHotSearchesOnce()
+    Component.onCompleted: page.requestHotSearchesOnce()
 
     // ---- pinned header --------------------------------------------------------
     TextField {
@@ -176,7 +186,7 @@ Item {
                                   : playlistGrid.count
         // Results fade in as they arrive and out when a new query clears them.
         property real contentReveal: resultCount > 0 ? 1 : 0
-        Behavior on contentReveal { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+        Behavior on contentReveal { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
 
         // One unified, always-scrollable list (providers first, then local;
         // player.searchRows is built in that order by

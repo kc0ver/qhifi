@@ -2,6 +2,23 @@
 // The upstream Java Swing layer is deliberately not used or loaded.
 #ifdef __APPLE__
 #import <Cocoa/Cocoa.h>
+
+@interface QPlayerWindowDragView : NSView
+@end
+
+@implementation QPlayerWindowDragView
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (void)mouseDown:(NSEvent *)event {
+    // This view covers the title bar, so it also owns the system double-click action.
+    if (event.clickCount == 2) {
+        NSString *action = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleActionOnDoubleClick"];
+        if ([action isEqualToString:@"Minimize"]) [self.window miniaturize:nil];
+        else if (![action isEqualToString:@"None"]) [self.window performZoom:nil];
+        return;
+    }
+    [self.window performWindowDragWithEvent:event];
+}
+@end
 #endif
 #ifdef _WIN32
 #include "upstream/windows/webview_embed.cc"
@@ -94,6 +111,66 @@ struct ProfileOverride {
 #define API(name) Java_dev_t1m3_qplayer_desktop_app_DesktopNativeBrowser_##name
 extern "C" {
 #ifdef __APPLE__
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_t1m3_qplayer_desktop_window_MacWindowChrome_installNative(
+        JNIEnv *env, jclass, jlong handle) {
+    NSWindow *window = reinterpret_cast<NSWindow *>(handle);
+    NSButton *zoom = [window standardWindowButton:NSWindowZoomButton];
+    if (!zoom || !window.contentView) return 0;
+    window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    window.titleVisibility = NSWindowTitleHidden;
+    window.titlebarAppearsTransparent = YES;
+    if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+    // The unified compact toolbar puts traffic lights on a toolbar baseline.
+    // AppKit owns their layout, tracking and hit targets throughout a live resize.
+    NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"QPlayerWindowControls"];
+    toolbar.showsBaselineSeparator = NO;
+    if (@available(macOS 11.0, *)) window.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
+    window.toolbar = toolbar;
+    [toolbar release];
+    [window.contentView.superview layoutSubtreeIfNeeded];
+    NSRect button = [zoom convertRect:zoom.bounds toView:nil];
+    NSRect frame = [window convertRectFromScreen:window.frame];
+    jdouble metrics[] = {NSMaxX(button), 2.0 * (NSMaxY(frame) - NSMidY(button))};
+    jdoubleArray result = env->NewDoubleArray(2);
+    if (result) env->SetDoubleArrayRegion(result, 0, 2, metrics);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_t1m3_qplayer_desktop_window_MacWindowChrome_setDragRegionNative(
+        JNIEnv *, jclass, jlong handle, jdouble left, jdouble right, jdouble height) {
+    NSView *content = reinterpret_cast<NSWindow *>(handle).contentView;
+    QPlayerWindowDragView *region = nil;
+    for (NSView *child in content.subviews) {
+        if ([child isKindOfClass:[QPlayerWindowDragView class]]) {
+            region = (QPlayerWindowDragView *)child;
+            break;
+        }
+    }
+    if (!region) {
+        region = [[[QPlayerWindowDragView alloc] initWithFrame:NSZeroRect] autorelease];
+        [content addSubview:region];
+    }
+    region.hidden = height <= 2;
+    if (region.hidden) return;
+    // A narrow outer rim remains available to AppKit for edge resizing.
+    NSRect bounds = content.bounds;
+    CGFloat top = content.isFlipped ? NSMinY(bounds) + 2 : NSMaxY(bounds) - height;
+    region.frame = NSMakeRect(left, top, std::max(0.0, NSWidth(bounds) - left - right), height - 2);
+    region.autoresizingMask = NSViewWidthSizable | (content.isFlipped ? NSViewMaxYMargin : NSViewMinYMargin);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_t1m3_qplayer_desktop_window_MacWindowChrome_setHiddenNative(
+        JNIEnv *, jclass, jlong handle, jboolean hidden) {
+    NSWindow *window = reinterpret_cast<NSWindow *>(handle);
+    window.toolbar.visible = !hidden;
+    for (auto button : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+        [window standardWindowButton:button].hidden = hidden;
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_dev_t1m3_qplayer_desktop_window_MacInput_installImeNative(
         JNIEnv *, jclass, jlong cocoaWindow) {

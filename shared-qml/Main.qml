@@ -28,21 +28,20 @@ Rectangle {
     // showing, so opening it never disturbs the page/route the user is on.
     property bool queueSheetOpen: false
 
-    // Keep the host-facing queue flag honest now that the queue is a sheet rather
-    // than a route (syncPageState only runs on route changes).
+    // The host-facing queue flag follows the sheet alone; routes never touch it.
     onQueueSheetOpenChanged: player.setQueueOpen(app.queueSheetOpen)
 
     function openQueue() { app.queueSheetOpen = true }
     function closeQueue() { app.queueSheetOpen = false }
     // Full-screen destinations share one navigation stack. Each drill-in keeps
-    // its source underneath, so queue -> artist -> back restores the queue. Artist
+    // its source underneath, so detail -> artist -> back restores the detail. Artist
     // and album routes also retain their ids, allowing deeper navigation to restore
     // the correct earlier entity instead of whichever one was loaded most recently.
     property var navigationStack: []
     property var currentRoute: navigationStack.length > 0
                                ? navigationStack[navigationStack.length - 1] : null
     property string currentOverlay: currentRoute ? currentRoute.type : ""
-    // Source-independent destinations (local files, cached songs, queue,
+    // Source-independent destinations (local files, cached songs,
     // settings and lyrics) remain usable without a plugin. Every online-source
     // destination shares one setup affordance instead of each page inventing a
     // different empty/loading state.
@@ -69,8 +68,10 @@ Rectangle {
     // the separately composited lyric page, uses this same motion vocabulary.
     // Zoom is the default; the final preset is an instant accessibility fallback.
     property int pageTransitionPreset: settings.value("pageTransitionPreset")
-    // Build only the initial home page on startup. Once visited, a page remains
-    // loaded so navigation state and close animations are preserved.
+    // Build only the initial home page on startup; the idle prewarm (see
+    // prewarmTimer) then builds the lazy root destinations in idle time. Once
+    // built, a page remains loaded so navigation state and close animations are
+    // preserved.
     property bool searchLoaded: false
     property bool libraryLoaded: false
     property bool localLoaded: false
@@ -78,7 +79,6 @@ Rectangle {
     property bool localPlaylistLoaded: false
     property bool artistLoaded: false
     property bool albumLoaded: false
-    property bool queueLoaded: false
     property bool recentLoaded: false
     property bool settingsLoaded: false
     property bool pluginSettingsLoaded: false
@@ -181,6 +181,9 @@ Rectangle {
     Component.onCompleted: {
         app.localTabLayout = app.showLocalTab
         player.setWideLayout(wide)
+        // The controller fetches the playlists during startup, so the list starts fresh:
+        // the first visit must not pay for a re-publish (see libraryRefreshedAt).
+        app.libraryRefreshedAt = Date.now()
     }
 
     // Shared nav model for both the bottom bar and the rail.
@@ -262,7 +265,6 @@ Rectangle {
         if (which === "pluginSettings") app.pluginSettingsLoaded = true
         if (which === "account") app.accountLoaded = true
         if (which === "cachedSongs") app.cacheListLoaded = true
-        if (which === "queue") app.queueLoaded = true
         if (which === "recent") app.recentLoaded = true
     }
 
@@ -277,10 +279,13 @@ Rectangle {
     }
 
     function syncPageState(which) {
+        // Every route change (push, replace, pop, root switch) funnels through here.
+        // The queue sheet floats above all pages, so a page opened from it (查看歌手)
+        // would otherwise land underneath the sheet, invisible.
+        app.closeQueue()
         app.syncingPageState = true
         player.setLyricsOpen(which === "lyrics")
         player.setRootInputBlocked(which !== "")
-        player.setQueueOpen(which === "queue")
         player.setArtistPageOpen(which === "artist")
         player.setAlbumPageOpen(which === "album")
         app.syncingPageState = false
@@ -405,8 +410,8 @@ Rectangle {
     }
 
     // Give the active route a declaration-order-independent z. This matters while
-    // the outgoing loader is still fading: queue is declared after artist in this
-    // file, but queue -> artist must put artist on top immediately.
+    // the outgoing loader is still fading: album is declared after artist in this
+    // file, but album -> artist must put artist on top immediately.
     function pageDepth(which) {
         for (var i = app.navigationStack.length - 1; i >= 0; i--) {
             if (app.navigationStack[i].type === which) return i + 1
@@ -450,6 +455,133 @@ Rectangle {
         }
     }
 
+    // Deferred destination load, started by switchTo(). One pending choice only:
+    // a second tap before it fires replaces the target, and a tap back onto the
+    // current page re-targets it there if that page is not built yet.
+    property int pendingLoadIndex: -1
+    // When 我的 last asked the controller to re-publish its playlists, and the TTL that
+    // gates it. Refreshing on EVERY visit froze the render thread for ~700-800 ms
+    // (screenrecord: the picture sat still from the end of the page motion until 2.3 s
+    // after the tap, with the GL thread at 55% CPU) because the publish re-evaluates
+    // every playlist card. The list is already published at startup and kept current by
+    // the account/source events, so a visit only re-fetches when the data is stale.
+    property real libraryRefreshedAt: 0
+    readonly property real libraryRefreshTtl: 300000   // 5 min
+    // Set when a visit finds the list stale; cleared by publishLibraryIfPending(),
+    // which the page calls once its chrome has painted (LibraryPage.chromeReady).
+    property bool libraryPublishPending: false
+    // LibraryPage signals chromeReady once, on the visit that builds it. Later visits
+    // run buildPendingDestination after the page motion has landed with the chrome
+    // already on screen, so a stale list publishes right there instead of waiting
+    // for a signal that never comes again.
+    property bool libraryChromePainted: false
+
+    function publishLibraryIfPending() {
+        app.libraryChromePainted = true
+        if (!app.libraryPublishPending) return
+        app.libraryPublishPending = false
+        app.libraryRefreshedAt = Date.now()
+        player.loadMyPlaylists()
+    }
+    Timer {
+        id: railLoadTimer
+        // Wait out the WHOLE transition, not just the pill: a first visit builds the
+        // destination's tree and its first row of delegates, which costs 200-700 ms on
+        // the render thread. At 200 ms that work landed inside the incoming page's
+        // entry animation (exit 187 + enter 260 = 447 ms at Ui.motionSlow) and the
+        // motion stuttered - "点我的页面时，歌单加载和动画一起了". The idle prewarm below
+        // builds the lazy root destinations shortly after startup; this timer covers a
+        // destination the prewarm has not reached yet (or skipped, e.g. 本地 enabled
+        // later) and runs 我的's stale-list refresh, both after the motion has landed.
+        // Stop the tap's feedback from waiting on it: the pill still paints on the tap
+        // frame.
+        interval: rootPageMotion.duration + rootPageMotion.exitDuration + 40
+        repeat: false
+        onTriggered: app.buildPendingDestination()
+    }
+
+    function buildPendingDestination() {
+        var idx = app.pendingLoadIndex
+        app.pendingLoadIndex = -1
+        if (idx === 1) {
+            app.searchLoaded = true
+        } else if (idx === app.libraryPageIndex) {
+            app.libraryLoaded = true
+            // Do not publish here: the page tells us when its chrome is on screen
+            // (chromeReady), because the publish itself blocks the render thread for
+            // ~700 ms and must not land on the page motion or on the first layout.
+            if (app.libraryRefreshedAt <= 0
+                    || Date.now() - app.libraryRefreshedAt > app.libraryRefreshTtl) {
+                app.libraryPublishPending = true
+                if (app.libraryChromePainted) app.publishLibraryIfPending()
+            }
+        } else if (idx === app.localPageIndex) {
+            app.localLoaded = true
+        }
+    }
+
+    function destinationLoaded(idx) {
+        if (idx === 1) return app.searchLoaded
+        if (idx === app.libraryPageIndex) return app.libraryLoaded
+        if (idx === app.localPageIndex) return app.localLoaded
+        return true
+    }
+
+    function scheduleDestinationBuild(idx) {
+        app.pendingLoadIndex = idx
+        // Set, don't rely on the binding: qml4j reads a Timer's interval when it is
+        // started, and the preset's duration can change before this tap.
+        railLoadTimer.interval = rootPageMotion.duration + rootPageMotion.exitDuration + 40
+        railLoadTimer.restart()
+    }
+
+    // ---- Idle prewarm -----------------------------------------------------------
+    // A destination's Loader builds its QML tree on the render thread the first
+    // time it is activated: qplayer.frame measured 12469 property changes and a
+    // 280 ms frame gap on the first tap of 已下载, while revisiting the same page
+    // stays at 110-120 fps. Activating the lazy Loaders one at a time, a beat
+    // apart, moves that construction into idle time. The flags are the same ones
+    // the tap would set; a page the user already opened simply skips its turn.
+    // Pages defer construction-time network/IO to their first visible frame
+    // (SearchPage hot searches), so building one here costs no request. A step is
+    // postponed while a page motion runs or a tapped destination is still waiting
+    // for railLoadTimer, so prewarm never builds a tree inside a transition.
+    property int prewarmStep: 0
+    Timer {
+        id: prewarmTimer
+        interval: 260
+        repeat: true
+        running: false
+        onTriggered: {
+            if (rootPageMotion.isRunning() || app.pageTransitionActive
+                    || app.pendingLoadIndex >= 0)
+                return
+            app.prewarmStep = app.prewarmStep + 1
+            if (app.prewarmStep === 1) app.searchLoaded = true
+            else if (app.prewarmStep === 2) app.libraryLoaded = true
+            else if (app.prewarmStep === 3 && app.showLocalTab) app.localLoaded = true
+            else if (app.prewarmStep === 4) app.recentLoaded = true
+            else if (app.prewarmStep === 5) {
+                // 已下载 also re-reads the downloaded list when it opens
+                // (AppActions: player.refreshCachedSongs() then replacePage), and
+                // that read was the remaining 258 ms on its first visit.
+                app.cacheListLoaded = true
+                player.refreshCachedSongs()
+            }
+            else if (app.prewarmStep >= 6) prewarmTimer.stop()
+        }
+    }
+    // Late enough that the first painted frames and the initial data fetch are
+    // done: starting this immediately just moved the same hitch earlier (cold
+    // start already stalls ~740 ms on GC and JIT).
+    Timer {
+        id: prewarmKick
+        interval: 900
+        repeat: false
+        running: true
+        onTriggered: prewarmTimer.start()
+    }
+
     // Root destinations use the same configurable exit/swap/entry sequence as
     // route-backed pages. Keeping only one page painted avoids two expensive QML
     // trees being laid out during the transition.
@@ -465,15 +597,26 @@ Rectangle {
                 rootPageMotion.enter()
             else if (cancellingPending)
                 rootPageMotion.restore()
+            // The pending slot may hold the destination just abandoned; without
+            // this a page swapped in but not built yet would stay blank.
+            if (!app.destinationLoaded(idx)) {
+                app.scheduleDestinationBuild(idx)
+            } else if (cancellingPending) {
+                app.pendingLoadIndex = -1
+                railLoadTimer.stop()
+            }
             return
         }
-        if (idx === 1) app.searchLoaded = true
-        if (idx === app.libraryPageIndex) app.libraryLoaded = true
-        if (idx === app.localPageIndex) app.localLoaded = true
         app.nextPage = idx;
-        if (idx === app.libraryPageIndex) player.loadMyPlaylists();
         rootPageMotion.direction = idx > app.page ? 1 : -1;
         rootPageMotion.transition();
+        // Click first, content second. Building a destination's tree (and its
+        // first list) can cost 200-700 ms on the render thread the first time it
+        // is shown; doing that inside the tap handler froze the highlight
+        // mid-hop, which is what "不跟手" was. railLoadTimer waits out the whole
+        // page motion (see its interval), so the tap frame only paints the
+        // selection and the destination builds behind a settled screen.
+        app.scheduleDestinationBuild(idx)
     }
 
     PageMotion {
@@ -609,6 +752,7 @@ Rectangle {
                         LibraryPage {
                             bottomContentInset: app.bottomContentInset
                             id: libraryPage
+                            onChromeReady: app.publishLibraryIfPending()
                             visible: app.page === app.libraryPageIndex
                             onOpenPlaylist: {
                                 player.openMediaPlaylist("" + libraryPage.pendingPlaylist.id)
@@ -682,19 +826,6 @@ Rectangle {
                 active: app.albumLoaded
                 sourceComponent: Component {
                     AlbumDetailPage {
-                        bottomContentInset: app.bottomContentInset
-                        onBack: app.popPage()
-                    }
-                }
-            }
-
-            ManagedPageLoader {
-                pageManager: app
-                motion: rootPageMotion
-                routeType: "queue"
-                active: app.queueLoaded
-                sourceComponent: Component {
-                    QueuePage {
                         bottomContentInset: app.bottomContentInset
                         onBack: app.popPage()
                     }

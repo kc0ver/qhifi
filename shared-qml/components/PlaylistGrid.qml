@@ -212,6 +212,11 @@ Flickable {
                 id: playlistCard
                 objectName: "virtualPlaylistCard"
                 playlistId: modelData.id
+                // One cover decode per ~24 ms instead of the whole first window on
+                // a single frame: opening 我的 froze for 744 ms decoding them all.
+                // Relative to the window, so a full rebuild (cols change) far down
+                // the list staggers from 0 instead of delaying every cover 480 ms.
+                coverDeferMs: Math.min(Math.max(0, index - grid.firstCard) * 24, 480)
                 scrollView: grid
                 tile: grid.tile
                 // While a drag is live, every card between the lifted slot and the
@@ -239,10 +244,10 @@ Flickable {
                 x: grid._indexToX(index) + _reorderOffsetX
                 y: grid._indexToY(index) + _reorderOffsetY
                 Behavior on _reorderOffsetX {
-                    NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+                    NumberAnimation { duration: 140; easing.type: Easing.InOutCubic }
                 }
                 Behavior on _reorderOffsetY {
-                    NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+                    NumberAnimation { duration: 140; easing.type: Easing.InOutCubic }
                 }
                 // The carried card is drawn once, by the floating copy below, so
                 // its slot in the grid simply empties out.

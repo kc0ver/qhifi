@@ -71,6 +71,7 @@ import dev.t1m3.qplayer.qml.QmlRuntimeLock;
 import dev.t1m3.qplayer.settings.SettingsCatalog;
 import dev.t1m3.qplayer.store.AppDirs;
 import dev.t1m3.qplayer.store.StorageFiles;
+import java.nio.file.Files;
 import dev.t1m3.qplayer.util.GitHubDownloadUrls;
 import dev.t1m3.qplayer.util.Logger;
 import dev.t1m3.qplayer.util.QrMatrix;
@@ -4239,6 +4240,7 @@ public final class PlayerController {
                 coverUrl.set("");
                 coverPath.set("");
                 applyCover(null, coverRevision.incrementAndGet());
+                artworkResolver.setQueueWindow(null, null, null);
                 pendingResumeIndex = -1;
                 pendingResumeMs = 0L;
                 needsReplay = false;
@@ -4247,6 +4249,13 @@ public final class PlayerController {
                 saveQueue();
                 notifyPlayback();
                 return;
+            }
+            int resume = pendingResumeIndex;
+            if (resume == position) {
+                pendingResumeIndex = -1;
+                pendingResumeMs = 0L;
+            } else if (resume > position) {
+                pendingResumeIndex = resume - 1;
             }
             if (position < current) {
                 playbackSession.index = current - 1;
@@ -4272,18 +4281,21 @@ public final class PlayerController {
             queue.add(to, moved);
             int current = playbackSession.index;
             if (current >= 0) {
-                if (current == from) {
-                    playbackSession.index = to;
-                } else if (from < current && to >= current) {
-                    playbackSession.index = current - 1;
-                } else if (from > current && to <= current) {
-                    playbackSession.index = current + 1;
-                }
+                playbackSession.index = movedQueueIndex(current, from, to);
                 index.set(playbackSession.index);
             }
+            if (pendingResumeIndex >= 0) pendingResumeIndex = movedQueueIndex(pendingResumeIndex, from, to);
             queueTracks.set(new ArrayList<>(queue));
             saveQueue();
         }
+    }
+
+    /** Where slot {@code i} ends up after the item at {@code from} moves to {@code to}. */
+    private static int movedQueueIndex(int i, int from, int to) {
+        if (i == from) return to;
+        if (from < i && to >= i) return i - 1;
+        if (from > i && to <= i) return i + 1;
+        return i;
     }
 
     /** Empty the queue and end playback. Same teardown as dropping the last
@@ -4312,6 +4324,7 @@ public final class PlayerController {
             coverUrl.set("");
             coverPath.set("");
             applyCover(null, coverRevision.incrementAndGet());
+            artworkResolver.setQueueWindow(null, null, null);
             pendingResumeIndex = -1;
             pendingResumeMs = 0L;
             needsReplay = false;
@@ -6179,7 +6192,6 @@ public final class PlayerController {
         onMain(
                 () -> {
                     if (coverRevision.get() != revision || !isCurrentTrack(track)) return;
-                    track.coverBytes = data;
                     applyCoverAndPath(data, path, revision);
                     notifyPlayback();
                 });
@@ -6277,11 +6289,17 @@ public final class PlayerController {
      */
     private void preloadAdjacent() {
         int n = playbackSession.queue.size();
-        if (n <= 1) return;
+        if (n == 0) {
+            artworkResolver.setQueueWindow(null, null, null);
+            return;
+        }
         int cur = playbackSession.index;
         if (cur < 0 || cur >= n) return;
-        Track next = playbackSession.queue.get((cur + 1) % n);
-        Track prev = playbackSession.queue.get((cur - 1 + n) % n);
+        Track current = playbackSession.queue.get(cur);
+        Track next = n > 1 ? playbackSession.queue.get((cur + 1) % n) : null;
+        Track prev = n > 1 ? playbackSession.queue.get((cur - 1 + n) % n) : null;
+        artworkResolver.setQueueWindow(current, prev, next);
+        if (next == null) return;
         preloadTrack(next);
         if (prev != next) preloadTrack(prev);
         preResolveNext();
@@ -6389,12 +6407,11 @@ public final class PlayerController {
     }
 
     private void preloadTrack(Track track) {
-        if (track == null || track.source != Track.Source.LOCAL || track.coverBytes != null) return;
+        if (track == null || track.source != Track.Source.LOCAL) return;
         ioWorker.submit(
                 () -> {
                     try {
-                        ArtworkResolver.Cover cover = artworkResolver.cachedCover(track);
-                        post(() -> track.coverBytes = cover.bytes());
+                        artworkResolver.cachedCover(track);
                     } catch (java.io.IOException error) {
                         Logger.warn("cover preload failed: {}", safeMessage(error));
                     }
@@ -7083,45 +7100,73 @@ public final class PlayerController {
         try {
             id = MediaId.parse(canonical);
         } catch (IllegalArgumentException error) {
+            publishNoLyricsIfPending(track);
             return;
         }
         ioWorker.submit(
                 () -> {
-                    List<LyricLine> cached = pluginLyricMem.get(canonical);
-                    if (cached == null && "netease".equals(id.provider())) {
-                        try {
-                            cached = fetchNeteaseLyrics(Long.parseLong(id.nativeId()));
-                        } catch (NumberFormatException ignored) {
-                            cached = Collections.emptyList();
+                    try {
+                        List<LyricLine> cached = pluginLyricMem.get(canonical);
+                        if (cached == null && "netease".equals(id.provider())) {
+                            try {
+                                cached = fetchNeteaseLyrics(Long.parseLong(id.nativeId()));
+                            } catch (NumberFormatException ignored) {
+                                cached = Collections.emptyList();
+                            }
                         }
+                        if (cached != null && !cached.isEmpty()) applyLyricsIfCurrent(track, cached);
+                        // A source without lyrics leaves the cover fallback in place;
+                        // preserve any lyrics already published from its cache.
+                        if (!pluginHasCapability(id.provider(), ProviderCapability.LYRICS)) {
+                            publishNoLyricsIfPending(track);
+                            return;
+                        }
+                        pluginProviders
+                                .lyrics(id)
+                                .whenCompleteAsync(
+                                        (payload, error) -> {
+                                            if (error != null) {
+                                                Logger.warn(
+                                                        "plugin {} lyric fetch failed: {}",
+                                                        id.provider(),
+                                                        safeMessage(error));
+                                                publishNoLyricsIfPending(track);
+                                                return;
+                                            }
+                                            try {
+                                                List<LyricLine> lines =
+                                                        LyricParser.fromPluginAssets(payload);
+                                                if (!lines.isEmpty())
+                                                    pluginLyricMem.put(canonical, lines);
+                                                applyLyricsIfCurrent(track, lines);
+                                            } catch (RuntimeException parseError) {
+                                                Logger.warn(
+                                                        "plugin {} lyric parse failed: {}",
+                                                        id.provider(),
+                                                        safeMessage(parseError));
+                                                publishNoLyricsIfPending(track);
+                                            }
+                                        },
+                                        ioWorker);
+                    } catch (RuntimeException error) {
+                        Logger.warn(
+                                "plugin {} lyric load failed: {}", id.provider(), safeMessage(error));
+                        publishNoLyricsIfPending(track);
                     }
-                    if (cached != null && !cached.isEmpty()) applyLyricsIfCurrent(track, cached);
-                    if (!pluginHasCapability(id.provider(), ProviderCapability.LYRICS)) return;
-                    pluginProviders
-                            .lyrics(id)
-                            .whenCompleteAsync(
-                                    (payload, error) -> {
-                                        if (error != null) {
-                                            Logger.warn(
-                                                    "plugin {} lyric fetch failed: {}",
-                                                    id.provider(),
-                                                    safeMessage(error));
-                                            return;
-                                        }
-                                        try {
-                                            List<LyricLine> lines =
-                                                    LyricParser.fromPluginAssets(payload);
-                                            if (!lines.isEmpty())
-                                                pluginLyricMem.put(canonical, lines);
-                                            applyLyricsIfCurrent(track, lines);
-                                        } catch (RuntimeException parseError) {
-                                            Logger.warn(
-                                                    "plugin {} lyric parse failed: {}",
-                                                    id.provider(),
-                                                    safeMessage(parseError));
-                                        }
-                                    },
-                                    ioWorker);
+                });
+    }
+
+    /**
+     * Keep the cover fallback when no loader will publish lyrics for {@code t}
+     * (fetch or parse failure, no lyrics capability, playback abandoned).
+     * Lyrics already published from a cache survive a later network failure.
+     */
+    private void publishNoLyricsIfPending(Track t) {
+        onMain(
+                () -> {
+                    List<LyricLine> current = lyrics.peek();
+                    if (isCurrentTrack(t) && (current == null || current.isEmpty()))
+                        applyLyrics(Collections.emptyList());
                 });
     }
 
@@ -7225,19 +7270,47 @@ public final class PlayerController {
         }
         playbackSession.resolving = true;
         final long request = playbackSession.request();
+        requestPluginStream(id, playLevel, request, track, expectedCoverRevision);
+    }
+
+    /**
+     * Resolve one plugin stream. A provider may refuse the *requested quality* while
+     * still serving the same track at a lower one — QQ Music answers "no playable
+     * address" for VIP-only tracks at exhigh but plays them at standard — so a failed
+     * resolve at any level is retried once at "standard" before the track is skipped.
+     */
+    private void requestPluginStream(MediaId id, String level, long request, Track track,
+                                     long expectedCoverRevision) {
+        final String requestedLevel = level == null || level.isEmpty() ? "standard" : level;
         pluginProviders
-                .resolveStream(id, playLevel)
+                .resolveStream(id, requestedLevel)
                 .whenComplete(
                         (stream, error) ->
                                 onMain(
-                                        () ->
-                                                completePluginResolution(
-                                                        request,
-                                                        track,
-                                                        id,
-                                                        stream,
-                                                        error,
-                                                        expectedCoverRevision)));
+                                        () -> {
+                                            boolean failed = error != null
+                                                    || stream == null
+                                                    || stream.url == null
+                                                    || stream.url.isEmpty();
+                                            // A superseded request (track changed or replayed
+                                            // meanwhile) must not spend another provider call.
+                                            if (failed && !"standard".equals(requestedLevel)
+                                                    && playbackSession.accepts(request, track)) {
+                                                Logger.info(
+                                                        "plugin {} resolve failed at {}, retrying at standard",
+                                                        id.provider(), requestedLevel);
+                                                requestPluginStream(id, "standard", request, track,
+                                                        expectedCoverRevision);
+                                                return;
+                                            }
+                                            completePluginResolution(
+                                                    request,
+                                                    track,
+                                                    id,
+                                                    stream,
+                                                    error,
+                                                    expectedCoverRevision);
+                                        }));
     }
 
     private void completePluginResolution(
@@ -8453,6 +8526,7 @@ public final class PlayerController {
             pendingResumeIndex = playbackSession.index;
             pendingResumeMs = mediaSessionPosition();
             loading.set(false);
+            publishNoLyricsIfPending(expected);
             showToast(reason);
             notifyPlayback();
             return;
@@ -8470,6 +8544,7 @@ public final class PlayerController {
                         playing.set(false);
                         showToast(I18n.tr("toast.play.failed", reason));
                     });
+            publishNoLyricsIfPending(expected);
             notifyPlayback();
             return;
         }
@@ -8483,6 +8558,15 @@ public final class PlayerController {
      *  sections it also returns are extra and are not counted against this. */
     private volatile int homePlaylistLimit = 12;
     private boolean homeRequested;
+    /** Provider, playlist limit and start time of the home request in flight (see loadHome). */
+    private volatile String homeInFlightProvider;
+    private volatile int homeInFlightLimit;
+    private volatile long homeInFlightStartNs;
+    /** Home generation whose network payload / cached payload is on screen. Both are
+     *  only touched from posted UI tasks, so a late cache read cannot replace the
+     *  fresh result, and a failed refresh keeps the cached page it was replacing. */
+    private long homeNetworkGeneration = -1L;
+    private long homeCachedGeneration = -1L;
 
     public void setHomePlaylistLimit(int value) {
         synchronized (QmlRuntimeLock.MONITOR) {
@@ -8515,6 +8599,19 @@ public final class PlayerController {
     /** Load the home content: recommended songs (login) + recommended playlists. */
     public void loadHome() {
         synchronized (QmlRuntimeLock.MONITOR) {
+            // Start-up asks for the home feed twice - the controller's init and the
+            // Activity's onStart - and each call is a ~6 s provider round trip whose
+            // first result is thrown away by the generation guard below. Collapse the
+            // duplicate only while a request is still young, so an explicit refresh
+            // (pull-to-refresh, source switch) still supersedes an old in-flight one.
+            PluginManifest wanted = primaryProviderWith(ProviderCapability.HOME);
+            if (wanted != null
+                    && wanted.id.equals(homeInFlightProvider)
+                    && homeInFlightLimit == homePlaylistLimit
+                    && System.nanoTime() - homeInFlightStartNs < 1_000_000_000L) {
+                Logger.info("home: duplicate request for {} ignored", wanted.id);
+                return;
+            }
             post(() -> homeLoading.set(true));
             // Switching away and back fast would otherwise let the first source's
             // in-flight result land on top of the second one's.
@@ -8522,12 +8619,40 @@ public final class PlayerController {
             homeRequested = true;
             PluginManifest provider = primaryProviderWith(ProviderCapability.HOME);
             if (provider != null) {
+                // Content first, network second: the provider's home call takes seconds
+                // on a cold start (measured: 5.9 s request-to-callback on the pad, one
+                // 1 s HTTP leg logged inside it), which the page can only spend showing
+                // a skeleton. The last payload is published from disk immediately and the
+                // refresh replaces it when it lands.
+                final long generationForCache = generation;
+                // Its own thread, not the shared ioWorker: on a cold start that queue is
+                // behind the plugin/catalog work and the cache landed 1.3 s after the
+                // request, with the scene build running on the same cores. Reading one
+                // small JSON does not need to wait for anything else.
+                Thread cacheRead = new Thread(
+                        () -> publishCachedHome(provider.id, generationForCache),
+                        "qplayer-home-cache");
+                cacheRead.setDaemon(true);
+                cacheRead.start();
+                final long homeStartNs = System.nanoTime();
+                homeInFlightProvider = provider.id;
+                homeInFlightLimit = homePlaylistLimit;
+                homeInFlightStartNs = homeStartNs;
+                Logger.info("home: request {} limit={}", provider.id, homePlaylistLimit);
                 pluginProviders
                         .home(provider.id, homePlaylistLimit)
                         .whenComplete(
                                 (home, error) ->
                                         post(
                                                 () -> {
+                                                    Logger.info(
+                                                            "home: response in {} ms (error={})",
+                                                            (System.nanoTime() - homeStartNs) / 1_000_000L,
+                                                            error == null ? "none" : safeMessage(error));
+                                                    if (provider.id.equals(homeInFlightProvider)) {
+                                                        homeInFlightProvider = null;
+                                                    }
+                                                    long publishStartNs = System.nanoTime();
                                                     if (generation != homeGeneration.get()) return;
                                                     if (!provider.id.equals(
                                                             pluginRegistry.primaryProvider()))
@@ -8538,6 +8663,9 @@ public final class PlayerController {
                                                                 "plugin {} home failed: {}",
                                                                 provider.id,
                                                                 safeMessage(error));
+                                                        // Offline or a flaky provider: the cached
+                                                        // page already on screen beats an empty one.
+                                                        if (homeCachedGeneration == generation) return;
                                                         clearHomeSections();
                                                         sourceRecommendPlaylists.set(
                                                                 Collections.<Playlist>emptyList());
@@ -8545,6 +8673,7 @@ public final class PlayerController {
                                                                 Collections.<Song>emptyList());
                                                         return;
                                                     }
+                                                    homeNetworkGeneration = generation;
                                                     ProviderHome value =
                                                             home != null
                                                                     ? home
@@ -8557,6 +8686,13 @@ public final class PlayerController {
                                                     sourceRecommendations.set(
                                                             Collections.unmodifiableList(
                                                                     new ArrayList<>(value.songs)));
+                                                    Logger.info(
+                                                            "home: published in {} ms (sections={}, playlists={}, songs={})",
+                                                            (System.nanoTime() - publishStartNs) / 1_000_000L,
+                                                            value.sections.size(),
+                                                            value.playlists.size(),
+                                                            value.songs.size());
+                                                    saveHomeCache(provider.id, value);
                                                 }));
                 return;
             }
@@ -8571,6 +8707,67 @@ public final class PlayerController {
             homeLoading.set(false);
             return;
         }
+    }
+
+    /** Cache of the last provider home payload, kept so a warm start can paint the
+     *  recommendation page before its network call answers (see publishCachedHome). */
+    private static final Gson HOME_GSON = new Gson();
+    private static final String HOME_CACHE_VERSION = "v1";
+
+    private static final class CachedHome {
+        String version;
+        String provider;
+        ProviderHome home;
+    }
+
+    private static java.nio.file.Path homeCacheFile() {
+        return AppDirs.indexFile("home-cache.json");
+    }
+
+    /** Publish the cached home payload on the UI queue, if it is still current. */
+    private void publishCachedHome(String providerId, long generation) {
+        long startNs = System.nanoTime();
+        try {
+            CachedHome cached = HOME_GSON.fromJson(
+                    StorageFiles.readUtf8(homeCacheFile()), CachedHome.class);
+            if (cached == null || cached.home == null
+                    || !HOME_CACHE_VERSION.equals(cached.version)
+                    || !providerId.equals(cached.provider)) {
+                return;
+            }
+            final ProviderHome home = cached.home;
+            post(() -> {
+                if (generation != homeGeneration.get() || homeNetworkGeneration == generation) return;
+                homeCachedGeneration = generation;
+                publishHomeSections(home.sections);
+                sourceRecommendPlaylists.set(Collections.unmodifiableList(
+                        new ArrayList<>(home.playlists)));
+                sourceRecommendations.set(Collections.unmodifiableList(
+                        new ArrayList<>(home.songs)));
+                homeLoading.set(false);
+                Logger.info("home: cached published ({} playlists, {} songs) in {} ms",
+                        home.playlists.size(), home.songs.size(),
+                        (System.nanoTime() - startNs) / 1_000_000L);
+            });
+        } catch (Throwable ignored) {
+            // Missing, stale or unreadable cache: the network request is the answer.
+        }
+    }
+
+    private void saveHomeCache(String providerId, ProviderHome home) {
+        ioWorker.execute(() -> {
+            try {
+                CachedHome cached = new CachedHome();
+                cached.version = HOME_CACHE_VERSION;
+                cached.provider = providerId;
+                cached.home = home;
+                java.nio.file.Path file = homeCacheFile();
+                if (file.getParent() != null) Files.createDirectories(file.getParent());
+                StorageFiles.writeUtf8Atomic(file, HOME_GSON.toJson(cached));
+            } catch (Throwable ignored) {
+                // A cache that cannot be written only costs the next start its head start.
+            }
+        });
     }
 
     private void publishPlayingArtist(Track t) {
@@ -9988,7 +10185,7 @@ public final class PlayerController {
             Track track = playbackSession.current();
             PlaybackSnapshot.TrackMetadata metadata = null;
             if (track != null) {
-                byte[] data = track.coverBytes;
+                byte[] data = coverBytes.peek();
                 if (data != snapshotArtworkSource) {
                     snapshotArtworkSource = data;
                     snapshotArtwork = data != null ? new PlaybackSnapshot.Artwork(data) : null;

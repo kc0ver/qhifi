@@ -35,6 +35,9 @@ public final class FluidBackground {
     public static final int STYLE_CLASSIC = 2;
 
     private static final int TEX_SIZE = 32;
+    /** Live backdrop render scale: 0.5 = half resolution per axis, a quarter of
+     *  the pixels. The image is a smooth gradient, so the upscale is invisible. */
+    private static final float LIVE_RENDER_SCALE = 0.5f;
 
     private static final String SHADER_ROOT = "/shaders/fluid/";
     private static final String[][] SHADER_FILES = {
@@ -109,7 +112,10 @@ public final class FluidBackground {
                 t.setDaemon(true);
                 return t;
             });
-    private volatile DecodedTextures decoded; // built off-thread, awaiting render thread
+    // Guarded by this: publication must not overwrite an unconsumed result or
+    // publish native images after dispose has drained the handoff.
+    private DecodedTextures decoded;
+    private boolean disposed;
     private volatile String decodingKey;  // the track key currently queued/decoding
     // Reused across frames -- the per-frame `new Paint()` was a native alloc/free
     // each frame the lyric page is visible.
@@ -123,6 +129,10 @@ public final class FluidBackground {
     // device resolution) and then blitted each frame, so static mode pays a single
     // full-screen SkSL pass per track/size instead of one every frame. Rebuilt when
     // the cover or the device size changes.
+    // Cached half-resolution target for the per-frame live pass.
+    private Surface liveSurface;
+    private int liveW = -1, liveH = -1;
+    private Rect liveRect;
     private Image staticImage;
     private int staticW = -1;
     private int staticH = -1;
@@ -173,14 +183,13 @@ public final class FluidBackground {
             final String key = trackKey;
             decoder.submit(() -> {
                 DecodedTextures textures = buildTextures(cb, key);
-                if (textures != null) decoded = textures;
+                if (textures != null) publishDecoded(textures);
             });
         }
         // Publish a ready off-thread texture (render thread): swap the shader, drop the
         // old cover. Cheap — the expensive work already happened on the decoder thread.
-        DecodedTextures ready = decoded;
-        if (ready != null && Objects.equals(ready.key, trackKey)
-                && !Objects.equals(coverKey, trackKey)) {
+        DecodedTextures ready = takeDecoded(trackKey);
+        if (ready != null) {
             // Retire the current cover to the "prev" slot and cross-fade to the new one
             // rather than snapping. Both stay alive until the fade ends (releasePrev).
             releasePrev();
@@ -192,7 +201,6 @@ public final class FluidBackground {
             coverPrevMesh = coverPrevShader == null ? null : coverMesh;
             cover = ready.raw;
             coverAdjusted = ready.adjusted;
-            decoded = null;
             coverKey = trackKey;
             coverAngles = ready.angles;
             coverMesh = ready.mesh;
@@ -239,7 +247,72 @@ public final class FluidBackground {
             // build failed -> fall through to the live shader this frame
         }
 
-        drawFluid(canvas, fullRect, w, h, time, fadeProgress(nowNs));
+        // Live pass at half resolution, then upscaled. The backdrop is a smooth
+        // gradient sampled bilinearly anyway, so half-res is indistinguishable at
+        // panel density, and this is the largest per-pixel cost on the page (a
+        // full-screen SkSL pass every frame). Rendering it at 1/4 of the pixels is
+        // what leaves fill rate for the system compositor's own blurs when the
+        // notification shade or recents comes down over the app.
+        float fade = fadeProgress(nowNs);
+        if (ctx != null) {
+            int dw = Math.max(1, Math.round(w * uiScale * LIVE_RENDER_SCALE));
+            int dh = Math.max(1, Math.round(h * uiScale * LIVE_RENDER_SCALE));
+            if (drawFluidScaled(canvas, ctx, fullRect, dw, dh, time, fade)) return;
+        }
+        drawFluid(canvas, fullRect, w, h, time, fade);
+    }
+
+    private synchronized void publishDecoded(DecodedTextures textures) {
+        if (disposed) {
+            textures.close();
+            return;
+        }
+        if (decoded != null) decoded.close();
+        decoded = textures;
+    }
+
+    private synchronized DecodedTextures takeDecoded(String trackKey) {
+        if (decoded == null || !Objects.equals(decoded.key, trackKey)
+                || Objects.equals(coverKey, trackKey)) return null;
+        DecodedTextures ready = decoded;
+        decoded = null;
+        return ready;
+    }
+
+    /** Render the live fluid into a cached 1/{@link #LIVE_RENDER_SCALE} surface and
+     *  blit it up. Returns false when the offscreen surface is unavailable, in which
+     *  case the caller draws at full resolution. */
+    private boolean drawFluidScaled(Canvas canvas, DirectContext ctx, Rect dstRect,
+                                    int dw, int dh, float time, float fade) {
+        if (liveSurface == null || liveW != dw || liveH != dh) {
+            releaseLive();
+            try {
+                liveSurface = Surface.makeRenderTarget(ctx, false, ImageInfo.makeN32Premul(dw, dh));
+            } catch (Throwable e) {
+                liveSurface = null;
+            }
+            if (liveSurface == null) return false;
+            liveW = dw;
+            liveH = dh;
+            liveRect = Rect.makeWH(dw, dh);
+        }
+        Canvas off = liveSurface.getCanvas();
+        off.clear(0);
+        drawFluid(off, liveRect, dw, dh, time, fade);
+        try (Image image = liveSurface.makeImageSnapshot()) {
+            canvas.drawImageRect(image, liveRect, dstRect, SamplingMode.LINEAR, null, true);
+        }
+        return true;
+    }
+
+    private void releaseLive() {
+        if (liveSurface != null) {
+            liveSurface.close();
+            liveSurface = null;
+        }
+        liveW = -1;
+        liveH = -1;
+        liveRect = null;
     }
 
     // Fade progress 0..1 since the last cover swap; releases the previous cover once done.
@@ -377,12 +450,16 @@ public final class FluidBackground {
      * and will be uploaded again when the next context lazily rebuilds caches.
      */
     public void invalidateGpuContext() {
+        releaseLive();
         invalidateStatic();
     }
 
     public void dispose() {
+        synchronized (this) {
+            disposed = true;
+            if (decoded != null) { decoded.close(); decoded = null; }
+        }
         decoder.shutdownNow();
-        if (decoded != null) { decoded.close(); decoded = null; }
         if (coverShader != null) {
             coverShader.close();
             coverShader = null;
@@ -400,6 +477,7 @@ public final class FluidBackground {
             coverAdjusted = null;
         }
         releasePrev();
+        releaseLive();
         invalidateStatic();
         if (saturationFilter != null) { saturationFilter.close(); saturationFilter = null; }
         fluidPaint.close();
@@ -481,19 +559,20 @@ public final class FluidBackground {
             // Decode + downscale to TEX_SIZE with Skija (no platform image lib):
             // raster the encoded cover into a 32x32 RGBA bitmap, then read back its
             // pixels for the blur-chain approximation.
-            Image src = Image.makeDeferredFromEncodedBytes(coverBytes);
-            ImageInfo thumbInfo = new ImageInfo(TEX_SIZE, TEX_SIZE,
-                    ColorType.RGBA_8888, ColorAlphaType.UNPREMUL);
-            Bitmap thumb = new Bitmap();
-            thumb.allocPixels(thumbInfo);
-            Canvas tc = new Canvas(thumb);
-            tc.drawImageRect(src,
-                    Rect.makeWH(src.getWidth(), src.getHeight()),
-                    Rect.makeWH(TEX_SIZE, TEX_SIZE),
-                    SamplingMode.LINEAR, null, true);
-            src.close();
-            byte[] raw = thumb.readPixels();
-            thumb.close();
+            byte[] raw;
+            try (Image src = Image.makeDeferredFromEncodedBytes(coverBytes);
+                 Bitmap thumb = new Bitmap()) {
+                ImageInfo thumbInfo = new ImageInfo(TEX_SIZE, TEX_SIZE,
+                        ColorType.RGBA_8888, ColorAlphaType.UNPREMUL);
+                thumb.allocPixels(thumbInfo);
+                try (Canvas tc = new Canvas(thumb)) {
+                    tc.drawImageRect(src,
+                            Rect.makeWH(src.getWidth(), src.getHeight()),
+                            Rect.makeWH(TEX_SIZE, TEX_SIZE),
+                            SamplingMode.LINEAR, null, true);
+                }
+                raw = thumb.readPixels();
+            }
             if (raw == null) return null;
 
             float[] rgb = new float[TEX_SIZE * TEX_SIZE * 3];
@@ -514,15 +593,24 @@ public final class FluidBackground {
             boxBlur(rgb, TEX_SIZE, TEX_SIZE, 2, 4);
             Image rawTexture = imageFromRgb(rgb);
 
-            // AMLL MeshGradientRenderer and QPlayer's classic renderer use the
-            // same cover pipeline before the mesh/warp: contrast .4,
-            // saturation 3, contrast 1.7, brightness .75, a chroma cap so a
-            // neon cover cannot clip to fluorescent primaries, then the same blur.
-            float[] adjustedRgb = amllAdjust(argb);
-            boxBlur(adjustedRgb, TEX_SIZE, TEX_SIZE, 2, 4);
-            Image adjustedTexture = imageFromRgb(adjustedRgb);
-            return new DecodedTextures(trackKey, rawTexture, adjustedTexture,
-                    generateAngles(trackKey, coverBytes), AMLLMeshGradient.create());
+            Image adjustedTexture = null;
+            boolean transferred = false;
+            try {
+                // Mesh/classic use contrast .4, saturation 3, contrast 1.7,
+                // brightness .75, a chroma cap, and the same blur as the raw cover.
+                float[] adjustedRgb = amllAdjust(argb);
+                boxBlur(adjustedRgb, TEX_SIZE, TEX_SIZE, 2, 4);
+                adjustedTexture = imageFromRgb(adjustedRgb);
+                DecodedTextures textures = new DecodedTextures(trackKey, rawTexture, adjustedTexture,
+                        generateAngles(trackKey, coverBytes), AMLLMeshGradient.create());
+                transferred = true;
+                return textures;
+            } finally {
+                if (!transferred) {
+                    rawTexture.close();
+                    if (adjustedTexture != null) adjustedTexture.close();
+                }
+            }
         } catch (Throwable e) {
             return null;
         }

@@ -2,6 +2,7 @@ package io.github.timer_err.qml4j.android;
 
 import android.app.Activity;
 import android.content.Context;
+import android.os.Build;
 import android.opengl.GLSurfaceView;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -41,6 +42,7 @@ import dev.t1m3.qplayer.resources.CompressedResources;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.ref.WeakReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -58,13 +60,19 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     private PlayerController controller;
     private SettingsCore settings;
     private volatile boolean failed;
-    private ErrorListener errorListener;
-    private SplashListener splashListener;
+    private volatile WeakReference<Activity> host = new WeakReference<>(null);
+    private volatile ErrorListener errorListener;
+    private volatile SplashListener splashListener;
     private volatile boolean readyFired;
     private volatile boolean disposed;
+    private volatile boolean sceneLoaded;
+    private volatile int rootIdentity;
+    private volatile int hostGeneration;
+    private int surfaceHostGeneration = -1;
     private volatile boolean gpuPaused;
     private volatile boolean pauseRequested;
     private boolean glThreadPaused;
+    private volatile boolean glThreadDetached;
     private boolean resourcesReleased;
     // A wake can land on the same frame that starts a Behavior. Its first tick only
     // captures the start time and may not change a Property, so keep a second frame
@@ -118,14 +126,14 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     // Logical-pixel scale: QML is authored in dp; render at the screen density times
     // the user's interface zoom so components are physically sized. The UI thread
     // reads it for touch mapping; the GL thread resizes the root when it changes.
-    private final float baseScale;
+    private float baseScale;
     private volatile float uiScale;
     private float appliedScale;
     private final LiquidGlassTilt liquidGlassTilt;
 
     public QmlGLSurfaceView(Context ctx, BundledQml bundle, ResourceLoader resources,
                             float uiScale) {
-        super(ctx);
+        super(ctx.getApplicationContext());
         this.bundle = bundle;
         this.engine = new QmlEngine(bundle);
         this.resources = resources;
@@ -152,20 +160,61 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
         wakeRenderer();
     }
 
+    /** Attach a window owner before adding this retained view to its new parent. */
+    public void attachHost(Activity activity) {
+        synchronized (QmlRuntimeLock.MONITOR) {
+            if (disposed) return;
+            host = new WeakReference<>(activity);
+            hostGeneration++;
+            baseScale = activity.getResources().getDisplayMetrics().density;
+            readyFired = false;
+            errorListener = null;
+            splashListener = null;
+            if (controller != null) controller.setRenderWake(renderWake);
+        }
+    }
+
+    /** Drop window ownership, but retain the loaded QML tree and CPU-side caches. */
+    public void detachHost() {
+        liquidGlassTilt.onPause();
+        synchronized (QmlRuntimeLock.MONITOR) {
+            host.clear();
+            hostGeneration++;
+            errorListener = null;
+            splashListener = null;
+            if (controller != null) controller.clearRenderWake(renderWake);
+            cancelPendingInput();
+        }
+        clearFocus();
+    }
+
+    public boolean hasScene() {
+        return sceneLoaded && !failed && !disposed;
+    }
+
+    public int sceneIdentity() {
+        return hasScene() ? rootIdentity : 0;
+    }
+
     @Override
     public void onPause() {
         pauseRequested = true;
         liquidGlassTilt.onPause();
         // GLSurfaceView.onPause() waits indefinitely for the render thread. Let
         // initial scene construction finish before asking that thread to pause.
-        if (!readyFired || disposed || glThreadPaused) return;
+        if (!sceneLoaded || disposed || glThreadPaused || glThreadDetached) return;
         pauseGlThread();
     }
 
     private void pauseGlThread() {
         gpuPaused = true;
         runOnGlThreadAndWait(() -> {
-            if (view != null) invalidateCanvasCaches(view.root());
+            if (resourcesReleased) return;
+            cancelPendingInput();
+            if (view != null) {
+                invalidateCanvasCaches(view.root());
+                view.renderer().setGpuContext(null);
+            }
             compositor.invalidateGpuContext();
             if (surface != null) {
                 surface.dispose();
@@ -188,14 +237,55 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
         wakeRenderer();
     }
 
-    /** Tear down QML bindings, images, shaders and decoder workers before an
-     * Activity recreation drops this view. QmlView.dispose() is what unsubscribes
-     * bindings from the process-wide shared PlayerController; omitting it retained
-     * each destroyed Activity and its native image graph. */
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        glThreadDetached = false;
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        // GLSurfaceView terminates its thread here. Invalidate GPU handles before
+        // it destroys EGL, even when a cold-start pause was deferred until ready.
+        pauseRequested = true;
+        liquidGlassTilt.onPause();
+        if (!glThreadPaused) pauseGlThread();
+        super.onDetachedFromWindow();
+        glThreadDetached = true;
+        if (disposed && !resourcesReleased) {
+            synchronized (QmlRuntimeLock.MONITOR) {
+                releaseSceneResources();
+            }
+        }
+    }
+
+    private void cancelPendingInput() {
+        systemGestureStream = false;
+        activeTouchPointerId = MotionEvent.INVALID_POINTER_ID;
+        lyGrab = false;
+        lyMoved = false;
+        if (resourcesReleased) return;
+        compositor.lyricRenderer().scrollCancel();
+        if (view == null) return;
+        DirtyQueue dq = view.dirtyQueue();
+        boolean ownBatch = DirtyQueue.current() != dq;
+        if (ownBatch) dq.install();
+        try {
+            view.dispatchPointerCancel();
+        } finally {
+            if (ownBatch) {
+                try { dq.flush(); }
+                finally { dq.uninstall(); }
+            }
+        }
+    }
+
+    /** Fully destroy the retained scene only when its owner finishes or fails. */
     public void dispose() {
         if (disposed) return;
         disposed = true;
         liquidGlassTilt.dispose();
+        detachHost();
         runOnGlThreadAndWait(this::releaseSceneResources);
     }
 
@@ -203,6 +293,8 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
         if (resourcesReleased) return;
         resourcesReleased = true;
         failed = true;
+        sceneLoaded = false;
+        rootIdentity = 0;
         if (controller != null) controller.clearRenderWake(renderWake);
         cleanup("QML scene", () -> {
             if (view != null) {
@@ -238,6 +330,14 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     }
 
     private void runOnGlThreadAndWait(Runnable action) {
+        // A detached GLSurfaceView keeps an exited GLThread object. Never queue
+        // destruction to it: its event queue will not be drained on reattachment.
+        if (glThreadDetached) {
+            synchronized (QmlRuntimeLock.MONITOR) {
+                action.run();
+            }
+            return;
+        }
         CountDownLatch done = new CountDownLatch(1);
         try {
             queueEvent(() -> {
@@ -297,6 +397,7 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
 
     @Override
     public boolean onTouchEvent(MotionEvent ev) {
+        if (disposed || pauseRequested || glThreadDetached || host.get() == null) return false;
         int action = ev.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
             systemGestureStream = inBottomSystemGestureZone(ev);
@@ -333,6 +434,7 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
         queueEvent(new Runnable() {
             @Override public void run() {
                 try {
+                    if (disposed || pauseRequested || host.get() == null) return;
                     if (view == null) {
                         dispatchTouchEvent(event, pointerIndex, dispatchedAction);
                         return;
@@ -562,8 +664,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     /** Expose a controller to QML as the {@code player} context global. Must be
      *  set before the GL thread first lays out (i.e. right after construction). */
     public void setController(PlayerController c) {
+        if (controller != null) controller.clearRenderWake(renderWake);
         this.controller = c;
-        if (c != null) {
+        if (c != null && host.get() != null) {
             c.setRenderWake(renderWake);
         }
     }
@@ -646,20 +749,32 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     }
 
     private void runOnUi(Runnable r) {
-        Context ctx = getContext();
-        if (ctx instanceof Activity) ((Activity) ctx).runOnUiThread(r);
+        WeakReference<Activity> owner = host;
+        Activity activity = owner.get();
+        if (activity != null) {
+            activity.runOnUiThread(() -> {
+                if (host == owner && owner.get() != null && !disposed) r.run();
+            });
+        }
     }
 
     private final class GlRenderer implements GLSurfaceView.Renderer {
         @Override
         public void onSurfaceCreated(GL10 gl, EGLConfig config) {
-            if (disposed) return;
-            surface = new SkijaGlSurface();
-            gpuPaused = false;
+            synchronized (QmlRuntimeLock.MONITOR) {
+                if (disposed) return;
+                surface = new SkijaGlSurface();
+                surfaceHostGeneration = hostGeneration;
+                gpuPaused = false;
+                compositor.onRenderResumed();
+            }
         }
 
         @Override
         public void onSurfaceChanged(GL10 gl, int width, int height) {
+            // A recreated holder surface (background/foreground) carries no frame-rate
+            // vote; forget the cached one so the next frame re-sends it.
+            requestedFrameRate = -1f;
             // Builds the scene on first use and resizes its root: same lock as frames.
             synchronized (QmlRuntimeLock.MONITOR) {
                 surfaceChanged(width, height);
@@ -723,6 +838,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                     byte[] iconFont = resources.load("fonts/MaterialSymbolsRounded.ttf");
                     if (iconFont != null) view.iconTypeface(iconFont);
                     bundle.load(view);
+                    rootIdentity = System.identityHashCode(view.root());
+                    sceneLoaded = true;
+                    android.util.Log.i("qplayer.scene", "load root=" + rootIdentity);
                 }
                 float scale = uiScale;
                 if (view.root() != null) {
@@ -776,6 +894,17 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                         || Boolean.TRUE.equals(controller.lyricsOpen.peek())
                         || (controller.lyricSlide.peek() != null
                             && controller.lyricSlide.peek() > 0.001)));
+                // The lyric page animates every vsync, but its content is a text sweep
+                // over a slowly morphing backdrop: 60 Hz reads the same and leaves the
+                // other 60 vacated vsyncs, GPU bandwidth and CPU time to the system
+                // compositor (notification shade, recents, split-screen). Ask for that
+                // explicitly instead of quietly taking the whole panel.
+                boolean lyricPageOn = controller != null && (
+                        Boolean.TRUE.equals(controller.lyricsOpen.peek())
+                        || (controller.lyricSlide.peek() != null
+                            && controller.lyricSlide.peek() > 0.001)
+                        || compositor.temperaVisible(controller));
+                requestFrameRate(lyricPageOn ? 60f : 0f);
                 boolean needContinuous = AndroidRenderPolicy.shouldRenderContinuously(
                         hostAnimation, frameChanges > 0, consumeWakeSettleFrame(), view.root());
                 if (!needContinuous && compositor.skippedLayout()) {
@@ -783,7 +912,8 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                 } else {
                     setRenderMode(RENDERMODE_CONTINUOUSLY);
                 }
-                if (!readyFired) {
+                if (!readyFired && host.get() != null
+                        && surfaceHostGeneration == hostGeneration) {
                     readyFired = true;
                     SplashListener l = splashListener;
                     if (l != null) l.onReady();
@@ -802,6 +932,32 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                     dq.uninstall();
                 }
             }
+        }
+    }
+
+    // Surface.setFrameRate hint: -1 = nothing requested yet, 0 = no preference.
+    private float requestedFrameRate = -1f;
+
+    /** Ask the display pipeline for the cadence this page needs (0 = clear the hint).
+     *  Surfaced through {@code android.view.Surface} because {@code Surface} in this
+     *  file already means the Skija one. */
+    private void requestFrameRate(float fps) {
+        if (Build.VERSION.SDK_INT < 30 || requestedFrameRate == fps) return;
+        requestedFrameRate = fps;
+        try {
+            android.view.Surface holderSurface = getHolder().getSurface();
+            if (holderSurface == null || !holderSurface.isValid()) {
+                requestedFrameRate = -1f;
+                return;
+            }
+            if (fps <= 0f) {
+                holderSurface.setFrameRate(0f, android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+            } else {
+                holderSurface.setFrameRate(fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            }
+        } catch (Throwable t) {
+            // No frame-rate hint on this device/panel; the render loop still works.
+            requestedFrameRate = -1f;
         }
     }
 

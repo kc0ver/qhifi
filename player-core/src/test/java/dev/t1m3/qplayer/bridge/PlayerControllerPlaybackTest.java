@@ -31,6 +31,47 @@ public class PlayerControllerPlaybackTest {
     @Rule public final ControllerTestLifecycle lifecycle = new ControllerTestLifecycle();
 
     @Test
+    public void switchingArtworkDoesNotRetainFullCoversInQueueRecords() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("artwork-ownership").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            Track[] tracks = new Track[8];
+            for (int i = 0; i < tracks.length; i++) {
+                tracks[i] = localTrack(base.resolve(i + ".wav").toString(), "track " + i);
+                Path cover = base.resolve(i + ".png");
+                Files.write(cover, new byte[]{(byte) (i + 1)});
+                tracks[i].coverLocalPath = cover.toString();
+            }
+            setQueue(controller, 0, tracks);
+            java.lang.reflect.Field field = PlayerController.class.getDeclaredField("ioWorker");
+            field.setAccessible(true);
+            java.util.concurrent.ExecutorService io =
+                    (java.util.concurrent.ExecutorService) field.get(controller);
+            for (int i = 0; i < tracks.length; i++) {
+                controller.playQueueIndex(i);
+                io.submit(() -> { }).get(3, java.util.concurrent.TimeUnit.SECONDS);
+                controller.pump();
+                assertEquals(i + 1, controller.coverBytes.peek()[0]);
+                assertEquals("system media controls still receive current artwork", i + 1,
+                        controller.playbackSnapshot().track().artwork().copyBytes()[0]);
+                for (Track track : tracks) {
+                    org.junit.Assert.assertNull("played covers must not accumulate on queue records",
+                            track.coverBytes);
+                }
+            }
+        } finally {
+            if (controller != null) lifecycle.close(controller);
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
     public void retiringSceneCannotDetachReplacementWakeCallback() throws Exception {
         String oldBase = AppDirs.base();
         String oldCacheBase = AppDirs.cacheBase();
@@ -1243,6 +1284,138 @@ public class PlayerControllerPlaybackTest {
             assertEquals("three", after.get(1).title);
             assertEquals("two", after.get(2).title);
             assertEquals(0, playIndex(controller));
+        } finally {
+            if (controller != null) lifecycle.close(controller);
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
+    public void switchingTracksShowsCoverUntilLyricsArrive() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        try {
+            Path base = temporaryFolder.newFolder("lyric-loading-cover").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            // No queue.json: nothing restored, so no restore-time lyric load races this test.
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            Path lyricFile = base.resolve("incoming.lrc");
+            Files.write(lyricFile, ("[00:01.00]incoming line one\n"
+                    + "[00:04.00]incoming line two\n[00:09.00]incoming line three")
+                    .getBytes(StandardCharsets.UTF_8));
+            Track incoming = localTrack("b.mp3", "b");
+            incoming.lyricFilePath = lyricFile.toString();
+            setQueue(controller, 0, localTrack("a.mp3", "a"), incoming);
+            // The page is in lyric layout for the outgoing track (cover at the side).
+            controller.lyrics.set(dev.t1m3.qplayer.lyric.LrcParser.parse(
+                    "[00:01.00]line one\n[00:04.00]line two\n[00:09.00]line three"));
+            controller.lyricsCoverOnly.set(false);
+
+            // Park the lyric loader to observe the loading state.
+            java.lang.reflect.Field ioField = PlayerController.class.getDeclaredField("ioWorker");
+            ioField.setAccessible(true);
+            java.util.concurrent.ExecutorService io =
+                    (java.util.concurrent.ExecutorService) ioField.get(controller);
+            java.util.concurrent.CountDownLatch parked = new java.util.concurrent.CountDownLatch(1);
+            io.submit(() -> {
+                parked.countDown();
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                return null;
+            });
+            assertTrue(parked.await(3, java.util.concurrent.TimeUnit.SECONDS));
+
+            controller.playQueueIndex(1);
+            assertTrue("the outgoing track's lyrics must be cleared",
+                    controller.lyrics.peek().isEmpty());
+            assertTrue("show the centered cover while the next track's lyrics load",
+                    controller.lyricsCoverOnly.peek());
+
+            release.countDown();
+            long deadline = System.currentTimeMillis() + ASYNC_FADE_TIMEOUT_MS;
+            while (controller.lyricsCoverOnly.peek() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10L);
+            }
+            assertFalse("return to the lyric layout once the new lyrics arrive",
+                    controller.lyricsCoverOnly.peek());
+            assertEquals("incoming line one", controller.lyrics.peek().get(0).text());
+        } finally {
+            release.countDown();
+            if (controller != null) lifecycle.close(controller);
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
+    public void abandoningAnUnplayableTrackKeepsExistingLyricsOrShowsCover() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("lyric-layout-abandon").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            Track only = localTrack("only.mp3", "only");
+            setQueue(controller, 0, only);
+            java.lang.reflect.Method skip = PlayerController.class.getDeclaredMethod(
+                    "skipUnplayable", Track.class, String.class);
+            skip.setAccessible(true);
+
+            // Lyrics already showing (a mid-track failure) are left alone.
+            List<dev.t1m3.qplayer.lyric.LyricLine> lines =
+                    dev.t1m3.qplayer.lyric.LrcParser.parse("[00:01.00]line one");
+            controller.lyrics.set(lines);
+            controller.lyricsCoverOnly.set(false);
+            skip.invoke(controller, only, "unplayable");
+            assertSame(lines, controller.lyrics.peek());
+            assertFalse(controller.lyricsCoverOnly.peek());
+
+            // A failed track without lyrics must still show the cover.
+            setQueue(controller, 0, only);
+            controller.lyrics.set(java.util.Collections.emptyList());
+            skip.invoke(controller, only, "unplayable");
+            assertTrue("no loader will answer: the layout settles as cover-only",
+                    controller.lyricsCoverOnly.peek());
+        } finally {
+            if (controller != null) lifecycle.close(controller);
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
+    public void reorderingBeforeFirstPlayKeepsTheRestoredResumePosition() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("resume-reorder").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            String queue = "{\"playIndex\":1,\"positionMs\":42000,\"playMode\":0,\"tracks\":["
+                    + "{\"source\":\"LOCAL\",\"title\":\"a\",\"durationMs\":120000,\"filePath\":\"a.mp3\"},"
+                    + "{\"source\":\"LOCAL\",\"title\":\"b\",\"durationMs\":120000,\"filePath\":\"b.mp3\"},"
+                    + "{\"source\":\"LOCAL\",\"title\":\"c\",\"durationMs\":120000,\"filePath\":\"c.mp3\"}]}";
+            Files.write(base.resolve("queue.json"), queue.getBytes(StandardCharsets.UTF_8));
+
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            controller.moveQueueItem(2, 0); // c, a, b: the restored track moves to slot 2
+            controller.removeFromQueue(0);  // a, b: and then to slot 1
+            assertEquals(1, playIndex(controller));
+
+            controller.playQueueIndex(1);
+            assertEquals("b.mp3", backend.lastSource);
+            assertEquals("the restored track resumes where it stopped", 42000L, backend.position);
+
+            controller.playQueueIndex(0);
+            assertEquals("a.mp3", backend.lastSource);
+            assertEquals("another track never inherits the resume point", 0L, backend.position);
         } finally {
             if (controller != null) lifecycle.close(controller);
             AppDirs.setBase(oldBase);

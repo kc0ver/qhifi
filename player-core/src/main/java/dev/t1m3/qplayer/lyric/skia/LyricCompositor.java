@@ -3,10 +3,13 @@ package dev.t1m3.qplayer.lyric.skia;
 import io.github.humbleui.skija.BlendMode;
 import io.github.humbleui.skija.Canvas;
 import io.github.humbleui.skija.DirectContext;
-import io.github.humbleui.skija.FilterTileMode;
+import io.github.humbleui.skija.Image;
 import io.github.humbleui.skija.ImageFilter;
+import io.github.humbleui.skija.Matrix33;
 import io.github.humbleui.skija.Paint;
+import io.github.humbleui.skija.SamplingMode;
 import io.github.humbleui.skija.Shader;
+import io.github.humbleui.skija.Surface;
 import io.github.humbleui.types.Rect;
 
 import io.github.timer_err.qml4j.engine.binding.Property;
@@ -22,6 +25,7 @@ import dev.t1m3.qplayer.lyric.tempera.TemperaTuning;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Platform-neutral per-frame compositor for the qplayer scene: it draws the QML
@@ -93,11 +97,10 @@ public final class LyricCompositor {
     // info button (LyricOverlay.qml's chainBtn) is the fourth.
     private static final float OFFSET_BTN_CORNER_W = 200f;
     private static final float OFFSET_BTN_CORNER_H = 52f;
-    // The same carve-out on the other side, for the close button and the
-    // keep-screen-on button beside it (2 x 40px + the 6px gaps and margins, plus
-    // slack). Only needed in the full-width layout: everywhere else the scrollable
-    // band starts at the half-width mark, which already leaves that corner to QML.
-    private static final float LEFT_BTN_CORNER_W = 104f;
+    // The same carve-out on the other side, for the close button. Only needed in
+    // the full-width layout: everywhere else the scrollable band starts at the
+    // half-width mark, which already leaves that corner to QML.
+    private static final float BACK_BTN_CORNER_W = 56f;
 
     private final LyricRenderer lyricRenderer = new LyricRenderer();
     private final FluidBackground fluidBg = new FluidBackground(System.nanoTime());
@@ -158,11 +161,32 @@ public final class LyricCompositor {
     // Crossfade stops as a fraction of column height, centred on the active line
     // (ALIGN_POSITION 0.35): sharp across 0.26–0.44, blur toward both edges.
     private static final float[] BAND_STOPS = {0f, 0.26f, 0.44f, 0.70f, 1f};
+    // The edge blur runs on a thumbnail; see ThumbnailBlur for the factor and the numbers
+    // behind it (the same shape as HyperOS' 缩略图 blur).
     private final Paint blurBasePaint = new Paint();
+    // Column snapshot: rendered once per frame in device space, blitted twice (blurred +
+    // sharp). Allocated to fit and reused while it still fits, so the per-frame device
+    // size changes of the zoom/slide transitions do not reallocate it every frame.
+    private final Paint columnBlurPaint = new Paint();
+    private Surface columnSurface;
+    private int columnSurfaceW = -1, columnSurfaceH = -1;
+    // Where this frame's snapshot sits: device rect rounded out to whole pixels, derived
+    // from the CTM below. Rects are rebuilt only when that placement changes.
+    private int columnDevL, columnDevT, columnDevW = -1, columnDevH = -1;
+    private float columnSx, columnSy, columnTx, columnTy;
+    private Rect columnSrcRect;   // (0, 0, devW, devH) in the snapshot
+    private Rect columnDevRect;   // the same pixels on the device
+    private Rect columnLocalRect; // the same pixels in the column's local space
     private ImageFilter blurFilter;
     private float blurSigmaApplied = -1f;
     private Shader blurBandShader;  // opaque at edges, transparent in the focus band
     private Shader sharpBandShader; // the complement — opaque in the focus band
+    // True while the page's graphics caches have been released because it is closed.
+    // The column snapshot is page-sized at device density (~15 MB at 800x1280 dp, 2x)
+    // and the per-row glyph rasters add ~1 MB each, so keeping them for the life of the
+    // process while the user browses elsewhere is pure waste: they are re-created on the
+    // first frame that draws the page again.
+    private boolean pageCachesReleased;
     private float bandShaderColH = -1f;
     private float bandShaderTopY = -1f;
     private float bandFracTop = -1f, bandFracBottom = -1f; // cached lit-band fractions
@@ -177,6 +201,19 @@ public final class LyricCompositor {
     // so the host lyric column scales + fades in lockstep with the QML cover's zoom
     // (SPlayer's whole-content zoom). TAU sets the settle time (~200 ms).
     private static final float LYRIC_ZOOM_TAU = 0.13f;
+    // Track-switch reveal for the incoming lyric column. The page holds its layout
+    // and blanks the column while the new track's lyrics are fetched (see
+    // PlayerController.clearLyricsPending), so without this the first line simply
+    // pops into place. A short fade + a few dp of rise reads as the column settling
+    // in, and costs nothing extra: both ride on the layer that is already being
+    // composited, no new pass, no second animating subtree.
+    private static final float TRACK_REVEAL_TAU = 0.085f;   // ~250 ms to settle
+    private static final float TRACK_REVEAL_RISE = 14f;     // dp, start offset
+    private float trackReveal = 1f;
+    private long trackRevealNs;
+    // Track whose lyrics last triggered (or were exempted from) the reveal. Keyed on the
+    // track, not the lyric list: one track can publish twice (cache, then network).
+    private String trackRevealMediaId;
     private float lyricShow = 0f;
     private long lyricShowNs = 0L;
     private final Paint lyLayerPaint = new Paint();
@@ -206,6 +243,7 @@ public final class LyricCompositor {
     /** Release scene-lifetime CPU/native resources. Must run on the owning render
      * thread after GPU-context caches have been invalidated. */
     public void dispose() {
+        closeColumnSurface();
         temperaPage.dispose();
         fluidBg.dispose();
         lyricRenderer.dispose();
@@ -227,6 +265,7 @@ public final class LyricCompositor {
         }
         lyMaskPaint.close();
         blurBasePaint.close();
+        columnBlurPaint.close();
         lyLayerPaint.close();
     }
 
@@ -268,7 +307,7 @@ public final class LyricCompositor {
                 return false;
             }
             boolean wide = fullWidthApplied;
-            if (wide && x <= LEFT_BTN_CORNER_W && y <= topInset + OFFSET_BTN_CORNER_H) {
+            if (wide && x <= BACK_BTN_CORNER_W && y <= topInset + OFFSET_BTN_CORNER_H) {
                 return false;
             }
             float topY = topInset + L_LANDSCAPE_TOP;
@@ -533,7 +572,11 @@ public final class LyricCompositor {
         // Closed and settled: nothing more to draw. RETURN BEFORE touching
         // lyricProgress — it changes every frame while playing, and setting it would
         // bump the change version every frame, defeating the renderer's idle skip.
-        if (lyricSlide <= 0.001f && !open) return;
+        if (lyricSlide <= 0.001f && !open) {
+            if (!pageCachesReleased) releasePageCaches();
+            return;
+        }
+        pageCachesReleased = false;
 
         // Per-frame playback fraction for the QML wavy progress bar and the word
         // renderer. backend.position() is coarse, so extrapolate with wall-clock time.
@@ -569,6 +612,17 @@ public final class LyricCompositor {
         if (lyObj != lastLyrics) {
             lastLyrics = lyObj;
             lyricRenderer.setLyrics(lastLyrics);
+        }
+        String mediaId = controller.currentMediaId.peek();
+        if (lyObj != null && !lyObj.isEmpty() && !Objects.equals(mediaId, trackRevealMediaId)) {
+            trackRevealMediaId = mediaId;
+            // A new track's lyrics landed on the open page: rise + fade them in rather
+            // than popping. While the page itself is still sliding in, that slide is
+            // the reveal; a second one would replay after every reopen.
+            if (lyricSlide >= 0.99f) {
+                trackReveal = 0f;
+                trackRevealNs = System.nanoTime();
+            }
         }
 
         float w = fbW / uiScale;
@@ -738,8 +792,18 @@ public final class LyricCompositor {
             // sqrt, so the dip is spent almost entirely at the seam: the column
             // stays readable for most of the travel and only blinks where the
             // line wrapping actually changes.
+            long revealNow = System.nanoTime();
+            if (trackReveal < 1f) {
+                float rdt = trackRevealNs != 0L ? (revealNow - trackRevealNs) / 1_000_000_000f : 1f;
+                trackRevealNs = revealNow;
+                if (rdt > 0.05f) rdt = 0.05f;
+                if (rdt > 0f) {
+                    trackReveal += (1f - trackReveal) * (1f - (float) Math.exp(-rdt / TRACK_REVEAL_TAU));
+                }
+                if (trackReveal > 0.999f) trackReveal = 1f;
+            }
             int alpha = Math.round(Math.max(0f, Math.min(1f,
-                    lyricShow * (float) Math.sqrt(fullWidthSwap))) * 255f);
+                    lyricShow * (float) Math.sqrt(fullWidthSwap) * trackReveal)) * 255f);
             lyLayerPaint.setAlpha(alpha);
             int lc = canvas.saveLayer(colRect, alpha < 255 ? lyLayerPaint : null);
             float s = 0.95f + 0.05f * lyricShow;
@@ -753,20 +817,19 @@ public final class LyricCompositor {
             // between where the column is drawn and where its snapped layout puts
             // it, and it is 0 the moment the transition settles.
             if (columnSlide != 0f) canvas.translate(columnSlide, 0f);
+            // Track-switch rise, under the same alpha: the column drifts up into
+            // its resting place while it fades in.
+            if (trackReveal < 1f) canvas.translate(0f, (1f - trackReveal) * TRACK_REVEAL_RISE);
             LyricSkia.setCanvas(canvas);
-            // Progressive blur is three nested saveLayers plus rendering the column
-            // TWICE (see drawProgressiveBlurColumn) - fine as a steady-state cost,
-            // but the cover<->lyrics switch already has the QML cover's own shadow/
-            // blur layer and this column's own zoom/alpha compositing animating at
-            // the same time, and this engine has no dirty-rect rendering (every
-            // animating subtree fully repaints every frame - see the qml4j gotchas
-            // notes on two heavy things animating at once). Skip the extra blur
-            // passes for the ~200-300ms the switch is actually moving; it settles
-            // back on within a couple of frames of the target being reached, which
-            // reads as smoothing out through the fast part of the motion rather
-            // than a visible pop.
-            boolean transitionSettled = lyricShow == zoomTarget && fullWidthSwap >= 0.999f;
-            if (transitionSettled && Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue())) {
+            // The edge blur used to be gated off for the ~200-300 ms the cover<->lyrics
+            // switch is moving: it cost three nested saveLayers and rendered the column
+            // TWICE (one shader draw per visible syllable each), and with no dirty-rect
+            // rendering in this engine two heavy things animating at once is what janks.
+            // It now renders the column ONCE into a GPU surface and blits that snapshot
+            // twice - sharp for the focus band, half-resolution thumbnail gaussian for
+            // the edges - so it stays on through the transition instead of popping in
+            // the moment the motion lands. See drawProgressiveBlurColumn.
+            if (Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue())) {
                 drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos);
             } else {
                 lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
@@ -779,32 +842,160 @@ public final class LyricCompositor {
         canvas.restoreToCount(sc);
     }
 
-    // Progressive edge blur: draw a uniformly blurred column, then overlay a sharp copy
-    // masked to a plateau around the active line. The mask ramps smoothly, so the
-    // sharp->blur transition is a continuous vertical gradient (Apple-Music depth of
-    // field) rather than the per-line steps a per-row blur produced. Two column renders +
-    // one blur pass — only on the opt-in path.
+    // Progressive edge blur: one render of the column into an offscreen GPU surface,
+    // then two blits of that snapshot — the blurred copy (kept at the edges) and the
+    // sharp one (kept in the focus band), each masked with its complementary vertical
+    // gradient. Rendering the column ONCE instead of twice is the point: a column
+    // render is one shader draw per syllable, and this path used to pay for two of
+    // them plus four full-column layers every frame.
     private void drawProgressiveBlurColumn(Canvas canvas, Rect colRect, float leftX,
                                            float colTopY, float colW, float colH, long pos) {
         float sigma = Math.max(1f, LyricConfig.instance.lyricFontSize.getValue() * EDGE_BLUR_SIGMA_RATIO);
         ensureBlurFilter(sigma);
 
-        // Blurred copy, kept only at the edges.
-        int mb = canvas.saveLayer(colRect, null);
-        int b = canvas.saveLayer(colRect, blurBasePaint);
-        lyricRenderer.render(canvas, leftX, colTopY, colW, colH, pos);
-        canvas.restoreToCount(b);
-        // Build the band from THIS frame's lit lines (render just refreshed them), so
-        // the sharp plateau covers the whole active group rather than one anchor line.
-        ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
-        applyColumnMask(canvas, blurBandShader);
-        canvas.restoreToCount(mb);
+        Surface snapshot = renderColumnToSurface(canvas, colRect, leftX, colTopY, colW, colH, pos);
+        if (snapshot == null) {
+            // No GPU surface behind this canvas (SkPicture recording), or a transform the
+            // device-space snapshot cannot express: keep the original two-render,
+            // three-layer path. Same pixels, just slower.
+            int mb = canvas.saveLayer(colRect, null);
+            int b = canvas.saveLayer(colRect, blurBasePaint);
+            lyricRenderer.render(canvas, leftX, colTopY, colW, colH, pos);
+            canvas.restoreToCount(b);
+            ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
+            applyColumnMask(canvas, blurBandShader);
+            canvas.restoreToCount(mb);
 
-        // Sharp copy, kept only across the focus band (complementary mask, no overlap).
-        int ms = canvas.saveLayer(colRect, null);
-        lyricRenderer.render(canvas, leftX, colTopY, colW, colH, pos);
-        applyColumnMask(canvas, sharpBandShader);
-        canvas.restoreToCount(ms);
+            int ms = canvas.saveLayer(colRect, null);
+            lyricRenderer.render(canvas, leftX, colTopY, colW, colH, pos);
+            applyColumnMask(canvas, sharpBandShader);
+            canvas.restoreToCount(ms);
+            return;
+        }
+        LyricSkia.setCanvas(canvas);
+
+        try (Image image = snapshot.makeImageSnapshot()) {
+            // Blurred copy, kept only at the edges. The thumbnail gaussian rides on
+            // the blit itself, so no extra layer is needed around it. Drawn under the
+            // page transform (to the local rect covering the snapshot's pixels) so the
+            // blur sigma keeps scaling with it; the blur hides any resampling here.
+            int mb = canvas.saveLayer(colRect, null);
+            columnBlurPaint.setImageFilter(blurFilter);
+            canvas.drawImageRect(image, columnSrcRect, columnLocalRect, SamplingMode.LINEAR,
+                    columnBlurPaint, true);
+            columnBlurPaint.setImageFilter(null);
+            // Build the band from THIS frame's lit lines (render just refreshed them), so
+            // the sharp plateau covers the whole active group rather than one anchor line.
+            ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
+            applyColumnMask(canvas, blurBandShader);
+            canvas.restoreToCount(mb);
+
+            // Sharp copy, kept only across the focus band (complementary mask, no overlap).
+            // Copied 1:1 onto the whole device pixels it was rendered for, so the focus
+            // band is never resampled at a fractional offset or a non-100% UI scale.
+            int ms = canvas.saveLayer(colRect, null);
+            int m = canvas.save();
+            canvas.resetMatrix();
+            canvas.drawImageRect(image, columnSrcRect, columnDevRect, SamplingMode.DEFAULT, null, true);
+            canvas.restoreToCount(m);
+            applyColumnMask(canvas, sharpBandShader);
+            canvas.restoreToCount(ms);
+        }
+    }
+
+    /** Render the column once into a cached GPU surface, in device space: the snapshot's
+     *  pixel grid is the device's, offset by the whole-pixel origin of {@code colRect}
+     *  under the current transform (zoom and slide included), so the sharp copy can be
+     *  put back without resampling. Returns null when the canvas has no surface (picture
+     *  recording) or its transform is not an axis-aligned scale + translate. */
+    private Surface renderColumnToSurface(Canvas canvas, Rect colRect, float leftX,
+                                          float colTopY, float colW, float colH, long pos) {
+        Matrix33 ctm = canvas.getLocalToDeviceAsMatrix33();
+        if (!placeColumnSnapshot(ctm.getMat(), colRect)) return null;
+        Surface owner;
+        try {
+            owner = canvas.getSurface();
+        } catch (Throwable t) {
+            return null;
+        }
+        // getSurface() hands back a new reference to the screen surface: release it now,
+        // not whenever the GC runs the Cleaner (off the GL thread).
+        try (Surface screen = owner) {
+            if (screen == null) return null;
+            int sw = columnDevW, sh = columnDevH;
+            if (columnSurface == null || sw > columnSurfaceW || sh > columnSurfaceH
+                    || (long) columnSurfaceW * columnSurfaceH > 2L * sw * sh) {
+                closeColumnSurface();
+                columnSurface = screen.makeSurface(sw, sh);
+                if (columnSurface == null) return null;
+                columnSurfaceW = sw;
+                columnSurfaceH = sh;
+            }
+        }
+        Canvas c = columnSurface.getCanvas();
+        c.clear(0);
+        int saved = c.save();
+        c.translate(-columnDevL, -columnDevT);
+        c.concat(ctm);
+        LyricSkia.setCanvas(c);
+        lyricRenderer.render(c, leftX, colTopY, colW, colH, pos);
+        c.restoreToCount(saved);
+        return columnSurface;
+    }
+
+    /** Derive this frame's device placement of the column snapshot from the CTM
+     *  (row-major 3x3). False when the transform is not a positive axis-aligned scale +
+     *  translate, which the whole-pixel device rect cannot represent. */
+    private boolean placeColumnSnapshot(float[] m, Rect colRect) {
+        float sx = m[0], sy = m[4], tx = m[2], ty = m[5];
+        if (m[1] != 0f || m[3] != 0f || m[6] != 0f || m[7] != 0f || m[8] != 1f
+                || !(sx > 0f) || !(sy > 0f) || !Float.isFinite(tx) || !Float.isFinite(ty)) {
+            return false;
+        }
+        int l = (int) Math.floor(colRect.getLeft() * sx + tx);
+        int t = (int) Math.floor(colRect.getTop() * sy + ty);
+        int w = Math.max(1, (int) Math.ceil(colRect.getRight() * sx + tx) - l);
+        int h = Math.max(1, (int) Math.ceil(colRect.getBottom() * sy + ty) - t);
+        if (l == columnDevL && t == columnDevT && w == columnDevW && h == columnDevH
+                && sx == columnSx && sy == columnSy && tx == columnTx && ty == columnTy) {
+            return true;
+        }
+        if (w != columnDevW || h != columnDevH) columnSrcRect = Rect.makeWH(w, h);
+        columnDevL = l;
+        columnDevT = t;
+        columnDevW = w;
+        columnDevH = h;
+        columnSx = sx;
+        columnSy = sy;
+        columnTx = tx;
+        columnTy = ty;
+        columnDevRect = Rect.makeXYWH(l, t, w, h);
+        columnLocalRect = Rect.makeLTRB((l - tx) / sx, (t - ty) / sy,
+                (l + w - tx) / sx, (t + h - ty) / sy);
+        return true;
+    }
+
+    private void closeColumnSurface() {
+        if (columnSurface != null) {
+            columnSurface.close();
+            columnSurface = null;
+        }
+        columnSurfaceW = -1;
+        columnSurfaceH = -1;
+    }
+
+    /** Free the graphics caches this page owns while it is closed. Called from the
+     *  closed-and-settled branch of {@link #drawLyricOverlay}, i.e. at most once per
+     *  close; the next drawn frame allocates them again lazily (column snapshot on the
+     *  first edge-blur frame, glyph rasters on the first animated row). */
+    private void releasePageCaches() {
+        pageCachesReleased = true;
+        closeColumnSurface();
+        lyricRenderer.releaseRasterCaches();
+        // The backdrop's live render target and its cached static frame are GPU
+        // allocations of the same kind (page-sized). They re-upload on the next
+        // drawn frame; the 32x32 cover textures stay, they are kilobytes.
+        fluidBg.invalidateGpuContext();
     }
 
     void applyColumnMask(Canvas canvas, Shader shader) {
@@ -816,11 +1007,19 @@ public final class LyricCompositor {
         lyMaskPaint.setShader(null);
     }
 
+    /** Blur filter for the edge-blur pass: gaussian on a 1/{@link ThumbnailBlur#SCALE}
+     *  thumbnail of the column, then scaled back up (see {@link ThumbnailBlur}).
+     *  Kept as a named entry point so the pixels can be asserted against the plain
+     *  full-resolution gaussian in a unit test. */
+    static ImageFilter edgeBlurFilter(float sigma) {
+        return ThumbnailBlur.gaussian(sigma);
+    }
+
     private void ensureBlurFilter(float sigma) {
         if (sigma == blurSigmaApplied && blurFilter != null) return;
         blurSigmaApplied = sigma;
         if (blurFilter != null) blurFilter.close();
-        blurFilter = ImageFilter.makeBlur(sigma, sigma, FilterTileMode.DECAL);
+        blurFilter = edgeBlurFilter(sigma);
         blurBasePaint.setImageFilter(blurFilter);
     }
 
@@ -905,6 +1104,7 @@ public final class LyricCompositor {
 
     /** Release context-bound caches before the host destroys its GPU context. */
     public void invalidateGpuContext() {
+        closeColumnSurface();
         temperaPage.releaseResources();
         fluidBg.invalidateGpuContext();
         for (LiquidGlassNode node : liquidGlass) {
