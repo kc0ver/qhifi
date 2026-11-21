@@ -93,10 +93,11 @@ public final class LyricCompositor {
     // info button (LyricOverlay.qml's chainBtn) is the fourth.
     private static final float OFFSET_BTN_CORNER_W = 200f;
     private static final float OFFSET_BTN_CORNER_H = 52f;
-    // The same carve-out on the other side, for the close button. Only needed in
-    // the full-width layout: everywhere else the scrollable band starts at the
-    // half-width mark, which already leaves that corner to QML.
-    private static final float BACK_BTN_CORNER_W = 56f;
+    // The same carve-out on the other side, for the close button and the
+    // keep-screen-on button beside it (2 x 40px + the 6px gaps and margins, plus
+    // slack). Only needed in the full-width layout: everywhere else the scrollable
+    // band starts at the half-width mark, which already leaves that corner to QML.
+    private static final float LEFT_BTN_CORNER_W = 104f;
 
     private final LyricRenderer lyricRenderer = new LyricRenderer();
     private final FluidBackground fluidBg = new FluidBackground(System.nanoTime());
@@ -267,7 +268,7 @@ public final class LyricCompositor {
                 return false;
             }
             boolean wide = fullWidthApplied;
-            if (wide && x <= BACK_BTN_CORNER_W && y <= topInset + OFFSET_BTN_CORNER_H) {
+            if (wide && x <= LEFT_BTN_CORNER_W && y <= topInset + OFFSET_BTN_CORNER_H) {
                 return false;
             }
             float topY = topInset + L_LANDSCAPE_TOP;

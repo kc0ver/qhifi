@@ -24,6 +24,16 @@ Rectangle {
     property bool hifiWatch: player.hifiEnabled
     onHifiWatchChanged: if (player.hifiEnabled) app.volumeOpen = false
     property bool sleepTimerOpen: false
+    // 播放队列 is a bottom sheet, not a route: it slides up over whatever page is
+    // showing, so opening it never disturbs the page/route the user is on.
+    property bool queueSheetOpen: false
+
+    // Keep the host-facing queue flag honest now that the queue is a sheet rather
+    // than a route (syncPageState only runs on route changes).
+    onQueueSheetOpenChanged: player.setQueueOpen(app.queueSheetOpen)
+
+    function openQueue() { app.queueSheetOpen = true }
+    function closeQueue() { app.queueSheetOpen = false }
     // Full-screen destinations share one navigation stack. Each drill-in keeps
     // its source underneath, so queue -> artist -> back restores the queue. Artist
     // and album routes also retain their ids, allowing deeper navigation to restore
@@ -228,6 +238,7 @@ Rectangle {
         // or lyric surface. Non-dismissible credential decisions still consume it.
         if (credentialDialogs.handleBack() || pluginDialogs.handleBack()) return
         if (app.dismissActiveDialog()) return
+        if (app.queueSheetOpen) { app.closeQueue(); return }
         if (player.songArtistPickerOpen) { player.closeSongArtistPicker(); return }
         if (mini.handleBack()) return
         if (lyricOverlay.handleBack()) return
@@ -526,7 +537,6 @@ Rectangle {
             anchors.fill: parent
             title: app.titles[app.page]
             appActions: appActions
-            onQueueRequested: app.replacePage("queue", 0)
             onVolumeRequested: app.volumeOpen = true
         }
     }
@@ -633,7 +643,7 @@ Rectangle {
                     PlaylistDetailPage {
                         bottomContentInset: app.bottomContentInset
                         onBack: app.popPage()
-                        onOpenQueue: app.pushPage("queue", 0)
+                        onOpenQueue: app.openQueue()
                     }
                 }
             }
@@ -647,7 +657,7 @@ Rectangle {
                     LocalPlaylistPage {
                         bottomContentInset: app.bottomContentInset
                         onBack: app.popPage()
-                        onOpenQueue: app.pushPage("queue", 0)
+                        onOpenQueue: app.openQueue()
                     }
                 }
             }
@@ -792,6 +802,7 @@ Rectangle {
         height: implicitHeight
         liquidGlass: app.floatingBottomChrome
         onLyricsRequested: app.pushPage("lyrics", 0)
+        onQueueRequested: app.openQueue()
     }
 
     // Bottom navigation (compact). On wide layouts the rail replaces it, so collapse
@@ -836,6 +847,17 @@ Rectangle {
     }
 
     TemperaLayer { anchors.fill: parent }
+
+    // 播放队列: floating right-half panel, see components/QueueSheet.qml. Kept as a
+    // component because Main.qml's AOT constructor is already at the bytecode
+    // limit -- inlining this block failed the build with MethodTooLargeException.
+    QueueSheet {
+        anchors.fill: parent
+        // Dock to the page pane: the left rail keeps its own column.
+        contentLeft: rail.x + rail.width
+        open: app.queueSheetOpen
+        onDismissRequested: app.closeQueue()
+    }
 
     LoginDialog {
         active: app.loginOpen
