@@ -1,6 +1,5 @@
-
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kc0ver/qhifi/master/shared-qml/app-icon.png?v=20261024" width="96" alt="QHIFI">
+  <img src="https://raw.githubusercontent.com/kc0ver/qhifi/master/shared-qml/app-icon.png?v=20261123" width="96" alt="QHIFI">
 </p>
 
 <h1 align="center">QHIFI</h1>
@@ -31,7 +30,7 @@ QHIFI 只发布 Android 安装包。仓库中的 `desktop-host` 保留用于共�
 的开发和验证，不是本 fork 的发行目标。
 
 > QHIFI 是社区 fork，不是上游 QPlayer 的官方发行版。上游的功能与修复会定期合并；本 fork
-> 的 USB 独占、音量体系和 QHIFI 设置是额外维护的部分。
+> 额外维护 USB 独占、音量体系、胆味音染、音频链路读数、系统字体回落和 QHIFI 设置。
 
 ## 核心特性
 
@@ -43,50 +42,92 @@ QHIFI 只发布 Android 安装包。仓库中的 `desktop-host` 保留用于共�
 - 直接解析 UAC2 描述符（兼容 UAC1），选择 alt-setting，提交等时传输 URB，并读取反馈
   端点做时钟 pacing；不依赖 libusb，也不需要 root。
 
-- 独占流按音源采样率打开；不经过系统重采样。音量拉满、不做数字衰减时，目标是
-  bit-perfect 输出。
+- 独占流按音源采样率打开，不经过系统重采样；硬件音量模式下 PCM 保持满幅。关闭软件
+  衰减和胆味时，目标是 bit-perfect 输出。
 
-- 独占不可用或未授权时回退到系统音频路径；独占播放期间拔掉 DAC 同样会**暂停播放**，
-  不切扬声器播放。
+- 开启独占（或启动时已开启）后立即抢占 DAC，不等首曲：音量键在播放前就能作用到真实
+  设备；如果框架路径正在播放，会在当前位置移交给独占流。关闭独占后，空闲的抢占会释放。
+
+- 独占不可用或未授权时回退到系统音频路径；独占播放期间拔掉 DAC 会**暂停播放**，不会
+  把 HiFi 流切到扬声器继续播。
 
 ### 音量体系
 
 独占路线和系统框架路线各自保存音量，互不继承：
 
-- **硬件音量模式**：应用直接写 DAC 的 UAC2 音量控制，PCM 保持满幅；DAC 机身按钮与
-  应用会互相覆盖。
+- **硬件音量模式**：应用直接写 DAC 的 UAC 音量控制（UAC1/UAC2 各自实现），PCM 保持
+  满幅；DAC 机身按钮与应用会互相覆盖。
 
-- **软件音量模式**：完全不碰 DAC 硬件音量，DAC 机身按钮作为前级，应用在其下做数字
-  衰减；两条路线不会争同一个控件。
+- **软件音量模式**：完全不写 DAC 硬件音量，DAC 机身按钮作为前级，应用在其下做数字
+  衰减；没有硬件音量控制的 DAC 会自动走软件模式。
 
-- 独占软件音量使用感知曲线（位置的三次方），框架路径保持线性；两条路线的默认电平和
-  曲线不同，切换输出时不会把一套音量直接套到另一条路线。
+- 软件音量可选**线性**或**幂曲线**（默认 γ=3，可在 1.0–6.0 调整）；硬件音量本身是
+  dB 线性映射，不受曲线影响。
 
-- 独占模式下显示音量 HUD；系统框架路径继续使用上游的原生音量语义。
+- 硬件/软件两种模式各自记忆独立电平（默认 30%），切换模式时恢复各自上次的值；从旧
+  版本升级会沿用原有独占音量。
+
+- 独占模式下显示音量 HUD，音量键由应用接管并直接调整独占流；系统框架路径继续使用
+  上游的原生音量语义。
+
+### 胆味音染（可选，仅独占路径）
+
+在 USB 独占流送进 DAC 之前插入一段可选的电子管风格染色：
+
+- 三种管型预设：**300B**（甜厚）、**EL34**（通透）、**6L6**（均衡）；强度 0–100
+  （默认 55），可单独关闭频响倾斜。
+
+- 采用 2 倍过采样 + 二次/三次谐波 + 包络调制 + 软限幅 + 20Hz 高通 + 两级倾斜；
+  16-bit 写回前加 TPDF dither。
+
+- 默认关闭。关闭时不进入处理函数，输出与原来一致；开启后歌词页的音频信息浮层会明确
+  显示「胆味 · 300B · 55%」，不会把染色后的链路标成 bit-perfect。
+
+- 可选的缓慢漂移（“呼吸”）默认关闭，保证效果可复现、可回归测试。
+
+### 音频链路读数
+
+设置页 **QHIFI** tab 的「音频链路」卡片会显示当前链路实际在做什么：
+
+- 请求模式与生效模式（独占不可用时会标出回落）、独占状态、音源格式、输出设备、
+  输出格式、是否重采样、位完美能力（已生效 / 可用 / 不支持）、USB 音频设备是否在位，
+  以及仅独占流才显示的 UAC 版本。
+
+- 不支持独占时会显示具体原因。
+
+- 设备和链路都有手动刷新入口；插拔 DAC 或刚授权后不必重启应用。
+
+歌词页的音频信息浮层另外显示音源、音源格式、输出格式、音色、独占状态和输出设备；
+胆味开启时音色行显示管型、强度和「非 bit-perfect」，关闭时显示「直通 · bit-perfect」。
 
 ### 播放、界面与歌词（继承上游）
 
 - 本地媒体库、播放队列、列表循环 / 随机 / 单曲循环，前台 `MediaSession` 接管锁屏、
-  通知栏和蓝牙控制。
+  通知栏和蓝牙控制；播放队列是可拖拽排序的浮层。
 
-- 歌曲信息与歌词在后台同步更新，返回前台后保留当前曲目状态；Android 在线播放的缓存
-  完成后不会中途重开流，只有缓冲或停滞时才从完整缓存恢复，并从原进度继续播放。
+- 支持本地播放列表、最近播放、睡眠定时、搜索和已下载歌曲。
 
-- 沉浸歌词页的正文由宿主通过 Skija 直接绘制：逐字滚动、流体背景、翻译/罗马音；页面
-  控件仍由 QML 渲染。安卓端原生对接词幕，逐字歌词、翻译、罗马音与播放进度由播放服务
-  同步，后台切歌或歌词延迟加载后仍会更新。
+- 歌曲信息与歌词在后台同步更新，返回前台后保留当前曲目状态；Activity 重建时保留
+  QML 场景，不会重新加载界面。
+
+- 沉浸歌词页的正文由宿主通过 Skija 直接绘制：逐字滚动、流体背景、mesh 渐变、翻译/
+  罗马音；页面控件仍由 QML 渲染。歌词页和凝彩页支持播放时常亮。
+
+- 安卓端原生对接词幕（Lyricon）：状态栏悬浮歌词支持锁定、转屏重定位，逐字歌词、
+  翻译、罗马音与播放进度由播放服务同步。
 
 - 支持歌曲下载：在菜单里为当前或选中歌曲选择音质（标准 / 较高 / 极高 / 无损 /
   Hi-Res），通过系统保存对话框写成 mp3/flac/m4a/ogg；插件下载复用音源的
   `resolveStream` 路径。
 
-- Miuix QML 界面运行在 [qml4j](https://github.com/TIMER-err/qml4j) 上，窄屏底部导航、
-  宽屏侧边栏，手机横屏和平板共用同一套响应式布局。
+- Miuix QML 界面运行在 [qml4j](https://github.com/TIMER-err/qml4j) 上：统一的设计
+  令牌、窄屏底部导航、宽屏侧栏，手机横屏和平板共用同一套响应式布局；界面缩放
+  80%–150%。
 
-- 支持简体中文和英文、深浅色主题、封面取色和 Material 动效。
+- 支持简体中文和英文、深浅色主题、封面取色和统一动效。
 
-- 整套界面使用 Miuix QML（`miuix.Core`），在 qml4j 上运行；随包 QML 组件在构建期
-  编译，运行时只装载预编译类，不再执行运行时编译。
+- 整套界面使用 Miuix QML（`miuix.Core`），随包 QML 组件在构建期编译，运行时只装载
+  预编译类，不再执行运行时编译。
 
 ### 插件与在线音源
 
@@ -94,42 +135,36 @@ QHIFI 核心不包含在线音源端点，也不分发音源实现。在线能�
 
 - 插件在隔离的 Rhino Realm 中运行，按清单声明能力与权限；
 
-- 内置插件目录只接受固定发布者的签名包；
+- 内置插件目录固定发布者公钥，只接受对应签名包，版本从各项目的 GitHub Releases 解析；
 
 - 插件不能提供 QML，只能返回声明式对话框描述，由宿主渲染；
 
 - 音质开关保持上游的全局 `exhigh` / `standard` 语义，所有音源插件共用。
 
-插件 ABI、权限、签名和凭据模型见 [插件开发文档](docs/plugins.md) 与
-[插件安全模型](docs/plugin-security.md)。
+插件页可以安装网易云音乐、QQ 音乐、酷我、咪咕、酷狗、汽水等第三方音源插件，以及
+用于导出下载文件的工具插件。插件 ABI、权限、签名和凭据模型见
+[插件开发文档](docs/plugins.md) 与 [插件安全模型](docs/plugin-security.md)。
 
 ### QHIFI 专有设置
 
 设置页的 **QHIFI** tab 集中放置本 fork 的额外设置：
 
-- USB 独占输出开关、输出设备选择、采样率跟随、音量模式；
+- USB 独占输出开关、输出设备选择、采样率跟随、音量模式、软件音量曲线与 γ 值；
 
-- 后台保活音轨（实验，默认关闭）。
+- 胆味（电子管音色）：总开关、管型、强度、频响倾斜、缓慢漂移；
+
+- 后台保活音轨（实验，默认关闭）；
+
+- 音频链路读数卡片。
+
+外观设置里还有本 fork 的字体差异：不随包内置 PingFang 字体，默认使用系统 CJK 字体；
+字体选择器保留导入本地字体文件的入口，没有内置字体时不会显示无效选项。
 
 ## 与上游 QPlayer 的关系
 
 QHIFI 跟随上游 QPlayer 的版本号，版本格式为 `<上游版本>-hifi`，对应 tag 为
 `v<上游版本>-hifi`。`master` 保留上游历史与真实的合并基，便于定期
 `git merge upstream/master`；不要 rebase、重排或改写历史。
-
-当前同步基线：上游 `1.9.4`。上游已把随包 QML 改为构建期预编译，本 fork 跟随该
-方案，因此不再有运行时 QML 编译，也没有可选的场景缓存。
-
-| 项目     | 上游 QPlayer           | QHIFI                     |
-| ------ | -------------------- | ------------------------- |
-| 发布平台   | Android + Desktop    | **仅 Android**             |
-| 包名     | `dev.t1m3.qplayer`   | `com.kc0ver.qhifi`        |
-| 应用名    | QPlayer              | QHIFI                     |
-| 输出路径   | AAudio / Oboe / 系统音频 | 用户态 usbfs USB 独占（可选）      |
-| 音量     | 上游原生逻辑               | 独占/框架双路线，硬件/软件音量分离        |
-| 设置 tab | HiFi / 播放等           | 原 HiFi 设置并入 **QHIFI** tab |
-| 启动编译   | 上游构建期预编译 QML       | 跟随上游，构建期预编译；无运行时编译、无可选场景缓存 |
-| CI     | 上游多平台                | 只构建 Android APK           |
 
 上游新增的播放器功能、歌词、界面、插件和桌面修复会随合并进入本仓库；但本 fork 不发布
 桌面安装包，也不承诺桌面端行为与上游发行版一致。
@@ -142,25 +177,23 @@ QHIFI 跟随上游 QPlayer 的版本号，版本格式为 `<上游版本>-hifi`�
 
 - `arm64-v8a` 设备；
 
-- 使用 USB 独占时，需要一台可通过 USB OTG 连接的 UAC DAC；
-
-- 不需要 root。
+- 使用 USB 独占时，需要一台可通过 USB OTG 连接的 UAC DAC。
 
 ### 下载与安装
 
 1. 从 [Releases](https://github.com/kc0ver/qhifi/releases) 下载最新的
-   `QHIFI-v<版本>.apk`。
+   `QHIFI-v<版本>.apk`，例如 `QHIFI-v2.3.1-hifi.apk`。
 2. 允许未知来源安装并安装 APK。
 3. 首次启动时授予通知、媒体读取等必要权限；连接 USB DAC 时按系统弹窗授予 USB 访问权。
 
 QHIFI 与上游 QPlayer 的包名和签名不同，不能直接覆盖安装上游版本，也没有自动数据迁移。
-如果要同时安装多个构建：QHIFI 的 debug 变体使用 `.debug` 后缀，release 使用正式包名，
-二者可以并存。
+如果要同时安装多个构建：QHIFI 的 debug 变体使用 `.debug` 后缀，perf 使用 `.perf` 后缀，
+release 使用正式包名，三者可以并存。
 
 ### 更新
 
-同一签名的 QHIFI Release 可以直接覆盖安装。安装/更新后第一次启动不再编译 QML（构建期
-已生成），播放列表、设置和账号凭据会保留。
+同一签名的 QHIFI Release 可以直接覆盖安装，播放列表、设置和账号凭据会保留。应用内
+更新会校验 Release 提供的 SHA-256（如果有），并复用本次进程内已下载且完整的安装包。
 
 ## 使用指南
 
@@ -181,193 +214,37 @@ QHIFI 不内置在线音源。安装 `.qplug` 插件并登录后，推荐、歌�
 3. 打开 **设置 → QHIFI → USB 独占输出**。
 4. 如需指定设备，在“输出设备”里选择 DAC；默认自动选择可用的 USB 音频设备。
 
-独占模式下，建议在系统设置里为 QHIFI 关闭电池优化，避免部分 ROM 在后台压制进程。若
-ROM 仍然把后台的本应用当作“未在放音”，可以打开“后台保活音轨（实验）”。独占路径完全
-绕开 AudioFlinger，因此系统音量键通常不再调整这条流；请使用应用内音量控件。
+开启后 QHIFI 会立即接管 DAC，音量键直接调整独占流。独占模式下，建议在系统设置里为
+QHIFI 关闭电池优化，避免部分 ROM 在后台压制进程。若 ROM 仍然把后台的本应用当作
+“未在放音”，可以打开“后台保活音轨（实验）”。
 
-### 音量模式怎么选
+独占路径完全绕开 AudioFlinger，系统音量条不会反映这条流的电平；请以音量 HUD 或应用
+内控件为准。
+
+### 音量模式的选择
 
 - 想让 DAC 的硬件音量控制由应用接管、PCM 保持满幅：选**硬件音量**。
 
 - 想完全不动 DAC 硬件音量、把机身按钮作为前级：选**软件音量**。
 
-两种模式不要混用；从一种切到另一种时，听到的响度可能变化，这是两条路线电平独立保存
-的结果。
+两种模式各自保存电平；从一种切到另一种时，听到的响度可能变化，这是两条路线独立保存
+的结果。没有硬件音量控制的 DAC 会自动使用软件音量。
 
-## 从源码构建
+### 胆味音染
 
-### 环境
+胆味只作用于 USB 独占路径，默认关闭：
 
-- JDK 21；
+1. 先打开 **USB 独占输出**。
+2. 在 **QHIFI** tab 打开「胆味（电子管音色）」。
+3. 选择管型（300B / EL34 / 6L6），再调强度；55% 左右是日常听感的甜点。
+4. 需要更“活”的听感时可以打开缓慢漂移；想要可复现的对比就保持关闭。
 
-- Maven 3.9+；
+开启后歌词页的音频信息浮层会显示当前是「胆味 · 管型 · 强度」，明确标记非 bit-perfect。
+关闭胆味后回到直通处理，输出不受影响。
 
-- Android SDK（compileSdk 34）与 NDK（版本由 `android-shell/app/build.gradle.kts` 指定）；
+## 开发
 
-- Gradle wrapper 随仓库提供；
-
-- Windows、macOS 或 Linux 均可构建 Android；本仓库的 CI 使用 Ubuntu。
-
-### Android Debug
-
-```sh
-# 仓库根目录：安装共享模块到 Maven Local
-mvn -B -pl player-core -am install -DskipTests
-
-# 构建 debug APK
-cd android-shell
-./gradlew :app:assembleDebug
-# Windows: .\gradlew.bat :app:assembleDebug
-
-# 性能排查使用独立的 perf 包（复用 release 构建配置）
-./gradlew :app:assemblePerf
-# Windows: .\gradlew.bat :app:assemblePerf
-```
-
-debug 产物：`android-shell/app/build/outputs/apk/debug/app-debug.apk`；perf 产物：
-`android-shell/app/build/outputs/apk/perf/app-perf.apk`。
-
-只有 `perf` 变体允许 shell 性能采集，正式发布包不因此开启 profiling。首次安装或更新后，等待
-`qplayer.lifecycle` 输出 `ready activity=...`，确认权限和插件提示已关闭，再比较相同页面与
-滚动操作，避免把首次界面装载或弹窗当成滚动耗时。Gradle 在构建主机编译全部随包 QML，再由
-常规 D8 步骤生成 DEX；应用内不再运行 D8，也没有动态编译回退。
-
-Android 测试包使用独立沙箱：从正式版复制本地库缓存时，必须先把索引中的封面路径重定位到
-测试包目录，再以测试包 UID 写入对应缓存文件；直接沿用 `/data/user/0/<正式包名>/…` 会因
-权限隔离而无法显示封面。
-
-### Android Release
-
-Release 签名通过环境变量提供；没有 keystore 时 Gradle 会产出未签名 APK：
-
-```sh
-export QPLAYER_KEYSTORE=/path/to/qplayer.jks
-export QPLAYER_STORE_PASSWORD=...
-export QPLAYER_KEY_ALIAS=...
-export QPLAYER_KEY_PASSWORD=...
-
-cd android-shell
-./gradlew :app:assembleRelease
-```
-
-产物：`android-shell/app/build/outputs/apk/release/app-release.apk`。CI 会把它重命名为
-`QHIFI-v<版本>.apk` 并附到 Release；本地构建不会自动改名。
-
-不要把 keystore、密码或 `local.properties` 提交到仓库。
-
-### 测试
-
-```sh
-# 核心 JVM 测试
-mvn -B -pl player-core test
-
-# 桌面宿主测试（可选；桌面端不发布）
-mvn -B -pl desktop-host test
-```
-
-`android-shell` 没有 `androidTest`；USB 独占、拔线、后台保活和在线源真实播放必须在
-真机上验证。模拟器无法加载 arm64-only 原生库，也没有真实 USB 总线。
-
-### 桌面宿主（仅开发）
-
-桌面端用于共享 QML/`player-core` 的本地验证，QHIFI **不发布**桌面安装包：
-
-```sh
-mvn -B -pl player-core,desktop-host -am install
-mvn -pl desktop-host exec:exec
-```
-
-> 关闭按钮为最小化到托盘（渲染线程销毁，音频继续播放），从托盘「退出」才会真正退出。
-> macOS 的 JVM 开发运行需加 `-XstartOnFirstThread`。上游的 GraalVM 原生分发包不在这里
-> 发布；需要时参见[桌面打包说明](desktop-host/dist/README.md)。
-
-### 发版
-
-1. 同步更新 `android-shell/app/build.gradle.kts` 的 `versionCode`（+1）和
-   `versionName`；`versionName` 保持 `<上游版本>-hifi`。
-2. 更新 `.github/release-notes.md`：Release 的正文由该文件提供，包含 QHIFI 额外改动和
-   本次合并的上游改动。
-3. 提交并推送 `master`，然后创建 annotated tag：
-
-```sh
-git tag -a v<versionName> -m "QHIFI v<versionName>"
-git push origin refs/tags/v<versionName>
-```
-
-例如 `versionName=1.8.6-hifi` 时，tag 是 `v1.8.6-hifi`。tag 必须与 `versionName`
-严格一致，否则应用内更新检查和 CI 资产会对不上。
-
-> 不要执行 `git push --tags`。仓库里同时存在上游的 `v1.8.6` 等 tag，整批推送可能触发
-> 非 QHIFI 的 Release；只推送本次的 `v*-hifi` tag。
-
-`release.yml` 只保留 Android job。CI 依赖四个仓库 secret：
-`QPLAYER_KEYSTORE_BASE64`、`QPLAYER_STORE_PASSWORD`、`QPLAYER_KEY_ALIAS`、
-`QPLAYER_KEY_PASSWORD`。签名密钥丢失后无法以同一签名更新已发布版本。
-
-### 合并上游
-
-上游仓库：<https://github.com/TIMER-err/qplayer>。合并时保留真实合并基，不要 rebase：
-
-```sh
-git remote add upstream https://github.com/TIMER-err/qplayer.git   # 只需一次
-git fetch --tags upstream
-git merge upstream/master
-```
-
-合并后至少重新构建三个模块，并确认 QML/native 改动没有被静默重复或覆盖：
-
-```sh
-mvn -B -N install -DskipTests
-mvn -B -pl player-core install -DskipTests
-mvn -B -pl desktop-host -am package -DskipTests
-cd android-shell && ./gradlew :app:compileDebugJavaWithJavac  # 或 assembleDebug
-```
-
-## 项目结构
-
-| 路径                                | 说明                                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| `player-core/`                    | 跨平台核心（Maven）：`PlayerController`、播放/队列、插件 ABI 与沙箱、歌词解析、资源与磁盘缓存、预编译 QML 场景装载。**不含在线音源端点**。 |
-| `shared-qml/`                     | 共享 QML：`Main.qml`、页面、组件、`miuix.Core`、字体。Android 与桌面开发宿主加载同一份。                        |
-| `qml-aot-tool/`                   | 仅构建期使用的 QML 编译器：生成组件类、场景清单与反射配置，不进入 APK。                                            |
-| `android-shell/`                  | Android 应用（Gradle）：`applicationId com.kc0ver.qhifi`，宿主集成、USB 权限与前台服务。                |
-| `android-shell/app/src/main/cpp/` | 用户态 UAC 驱动：usbfs claim、UAC2 描述符解析、等时 URB、反馈端点。                                       |
-| `desktop-host/`                   | 桌面开发宿主（Maven + LWJGL/GLFW + Skija）；QHIFI 不发布桌面版。                                     |
-| `docs/`                           | 插件 ABI、安全模型、Miuix UI、Android 重建、QHIFI 待办。                                            |
-| `.github/`                        | Android-only Release 工作流、Release 正文模板、构建缓存。                                          |
-
-相关文档：
-
-- [插件 ABI](docs/plugins.md)
-
-- [插件安全模型](docs/plugin-security.md)
-
-- [Miuix 界面说明](docs/miuix-ui.md)
-
-- [Android 内存重建](docs/android-memory-recreation.md)
-
-- [QHIFI 待办与未完成项](docs/qplayer-hifi-phase2-plan.md)
-
-## 测试与已知边界
-
-- **只发布 Android arm64**：原生 USB 驱动与 Skija 只编译 `arm64-v8a`；x86\_64 模拟器
-  无法运行。
-
-- **USB 独占需要真机**：模拟器没有真实 USB 总线，独占路径无法打开；拔线、后台和 DAC
-  兼容性也必须在真机验证。
-
-- **没有 androidTest**：自动化测试覆盖 `player-core` 的 JVM 逻辑和构建契约；独占音频、
-  在线源和 ROM 后台行为只能人工验证。
-
-- **桌面端不发布**：`desktop-host` 只用于共享 UI/逻辑的开发验证。
-
-- **在线音源依赖插件**：核心不提供任何在线音源端点；插件签名、权限和可用性由插件侧
-  决定。
-
-- **QML 在构建期编译**：修改 QML 后必须重新构建 APK，运行时没有源码回退。
-
-- **部分 ROM 会压制后台应用**：独占输出绕开 AudioFlinger 后，系统可能把应用视为
-  “未在放音”；可尝试关闭电池优化或开启后台保活音轨。
+构建、测试、发版、桌面宿主、上游合并和项目结构见 [开发指南](docs/development.md)。
 
 ## 常见问题
 
@@ -381,19 +258,32 @@ DAC 支持范围内（Echo-BP 最高 96kHz/24bit）。
 USB DAC 分 UAC 1.0 与 UAC 2.0 两代音频类，采样率协商、时钟与音量控制的实现都不同。
 QHIFI 会显示当前独占流实际使用的版本；没有打开独占流（系统框架输出）时不显示。
 
-**为什么独占模式下系统音量键没有反应？**
-独占流不经过系统混音，音量由应用接管。请使用应用内的音量 HUD 或音量控件。
+**为什么开启独占后，DAC 在没播放时也被占用？**
+这是刻意的：开启独占就把 DAC 交给应用，音量键和音量控件在播放前就能作用到真实设备。
+关闭独占后，空闲占用会释放。
+
+**为什么独占模式下系统音量条不跟着动？**
+独占流不经过系统混音，音量由应用接管。QHIFI 拦截音量键并直接调整独占流（硬件音量
+或软件衰减），系统音量条不反映这条流；请以音量 HUD 或应用内控件为准。
 
 **为什么开启独占后，切回系统音频时音量不一样？**
-独占与框架两条路线各自保存电平，默认值和曲线也不同；这是为了避免同一条曲线跨路线
-产生响度跳变。
+独占与框架两条路线各自保存电平，软件音量的默认值和曲线也不同；这是为了避免同一条
+曲线跨路线产生响度跳变。
 
 **为什么拔掉 USB DAC 后没有切到扬声器？**
 独占模式下这是刻意行为：拔线即暂停，避免把 HiFi 流意外切到扬声器继续播放。
 
+**为什么开启胆味后音频信息浮层显示“非 bit-perfect”？**
+胆味会在样本域加入谐波和频响倾斜，输出已经不是原始信号。默认关闭；关闭后回到直通
+处理，硬件音量满幅时仍是 bit-perfect 目标。
+
 **为什么息屏或后台会无声？**
 部分 ROM 会压制绕开音频框架的后台进程。先关闭 QHIFI 的电池优化；仍无效时可尝试
 “后台保活音轨（实验）”。
+
+**为什么界面用的是系统字体？**
+本构建不随包内置 PingFang，默认回落到系统 CJK 字体，避免额外体积和无用的内置选项；
+需要其他字体时可在字体选择器里导入本地字体文件。
 
 **为什么更新后第一次启动不再出现“正在编译界面组件”？**
 QML 已改为构建期预编译，APK 内只有预编译类和场景清单；启动时不再执行运行时编译。
@@ -413,19 +303,10 @@ QHIFI 的目标是 Android 上的 USB 独占 HiFi 输出；桌面宿主只保留
 
 - 代码、文档和问题反馈欢迎提交到 [kc0ver/qhifi](https://github.com/kc0ver/qhifi)。
 
-- 合并上游时保留真实合并基，不 rebase、不改写已发布历史；合并后实际编译验证。
-
-- 修改 `player-core` 后先 `mvn -pl player-core install -DskipTests`，再构建 Android。
+- 构建、测试、发版和上游合并流程见 [开发指南](docs/development.md)。
 
 - 插件相关改动请先阅读 [插件 ABI](docs/plugins.md) 和
   [安全模型](docs/plugin-security.md)。
-
-- 发版前更新 `.github/release-notes.md`，否则 Release 会沿用上一次的说明。
-
-构建产物先保存到 workflow artifacts。全部构建成功后，`publish` 统一上传附件，
-上传成功后才将 Release 转为正式版或预发布版。发布已有 tag 时不传 `target_commitish`，
-避免旧提交与当前 `master` 的工作流文件不同而触发额外权限检查；此操作不移动 tag。
-CI 不再自动运行测试；测试代码和本地测试命令保留。
 
 ## 致谢
 
@@ -439,6 +320,8 @@ CI 不再自动运行测试；测试代码和本地测试命令保留。
 
 - [SPlayer](https://github.com/imsyy/SPlayer)、
   [AMLL](https://github.com/amll-dev/amll-player) —— 流体歌词与歌词动效的参考。
+
+- [Lyricon](https://github.com/proify/lyricon) —— 状态栏歌词（词幕）对接。
 
 - [swingwebview](https://github.com/webliteca/swingwebview) —— 桌面端网页登录的原生
   WebView 后端。

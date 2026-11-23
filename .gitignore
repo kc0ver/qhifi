@@ -66,3 +66,6 @@ local.properties
 
 # Trae agent workspace scratch (local only)
 .trae/
+
+# Local filter app workspace (not part of this repo)
+/filter/
